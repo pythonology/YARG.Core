@@ -79,6 +79,7 @@ namespace YARG.Core.Song
         protected AvailableParts _parts = AvailableParts.Default;
         protected HashWrapper _hash = default;
         protected LoaderSettings _settings = LoaderSettings.Default;
+        protected StarRatings _starRatings = new();
         protected string _parsedYear = string.Empty;
         protected int _yearAsNumber = int.MaxValue;
 
@@ -200,6 +201,13 @@ namespace YARG.Core.Song
         }
 
         public sbyte BandDifficulty => _parts.BandDifficulty.Intensity;
+
+        /// <summary>
+        /// Star ratings produced by the Ghpp difficulty calculator, keyed by (instrument, difficulty).
+        /// Empty for entries scanned before the Ghpp integration or for entry types that don't
+        /// currently feed the calculator (e.g. RBCON).
+        /// </summary>
+        public StarRatings StarRatings => _starRatings;
 
         public bool IsDuplicate => _isDuplicate;
 
@@ -429,6 +437,8 @@ namespace YARG.Core.Song
             stream.Write(_settings.HopoThreshold, Endianness.Little);
             stream.Write(_settings.SustainCutoffThreshold, Endianness.Little);
             stream.Write(_settings.OverdiveMidiNote, Endianness.Little);
+
+            _starRatings.Serialize(stream);
         }
 
         protected SongEntry() { }
@@ -517,6 +527,8 @@ namespace YARG.Core.Song
             _settings.HopoThreshold = stream.Read<long>(Endianness.Little);
             _settings.SustainCutoffThreshold = stream.Read<long>(Endianness.Little);
             _settings.OverdiveMidiNote = stream.Read<int>(Endianness.Little);
+
+            _starRatings = StarRatings.Deserialize(ref stream);
 
             SetSortStrings();
         }

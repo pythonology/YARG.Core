@@ -16,6 +16,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\ghpp\src\Ghpp.Core\Ghpp.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="Logging\YargLogger.Methods.t4">
       <Generator>TextTemplatingFileGenerator</Generator>
       <LastGenOutput>YargLogger.Methods.cs</LastGenOutput>
@@ -29,5 +33,16 @@
       <DependentUpon>YargLogger.Methods.t4</DependentUpon>
     </Compile>
   </ItemGroup>
+
+  <Target Name="DeployGhppToUnityPlugins" AfterTargets="Build">
+    <ItemGroup>
+      <_GhppPluginDlls Include="$(OutDir)Ghpp.Core.dll" />
+      <_GhppPluginDlls Include="$(OutDir)Ghpp.Core.Abstractions.dll" />
+    </ItemGroup>
+    <Copy
+      SourceFiles="@(_GhppPluginDlls)"
+      DestinationFolder="$(MSBuildThisFileDirectory)Plugins\Ghpp\"
+      SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

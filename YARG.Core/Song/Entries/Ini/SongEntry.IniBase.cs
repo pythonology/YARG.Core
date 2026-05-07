@@ -278,7 +278,56 @@ namespace YARG.Core.Song
                     entry._metadata.SongLength = (long) (mixer.Length * SongMetadata.MILLISECOND_FACTOR);
                 }
             }
+
+            ComputeStarRatings(entry, file);
+
             return ScanResult.Success;
+        }
+
+        /// <summary>
+        /// Runs the Ghpp difficulty calculator against the just-scanned chart and stores the
+        /// per-(instrument, difficulty) star ratings on the entry. Best-effort: failures here
+        /// must never invalidate an otherwise successful scan.
+        /// </summary>
+        private static void ComputeStarRatings(IniSubEntry entry, FixedArray<byte> file)
+        {
+            try
+            {
+                var parseSettings = new ParseSettings
+                {
+                    HopoThreshold = entry._settings.HopoThreshold,
+                    SustainCutoffThreshold = entry._settings.SustainCutoffThreshold,
+                    StarPowerNote = entry._settings.OverdiveMidiNote,
+                    TuningOffsetCents = entry._settings.TuningOffsetCents,
+                    DrumsType = ParseDrumsType(in entry._parts),
+                    ChordHopoCancellation = entry._chartFormat != ChartFormat.Chart,
+                };
+
+                SongChart? chart;
+                if (entry._chartFormat == ChartFormat.Mid || entry._chartFormat == ChartFormat.Midi)
+                {
+                    using var stream = file.ToReferenceStream();
+                    chart = SongChart.FromMidi(in parseSettings, MidFileLoader.LoadMidiFile(stream));
+                }
+                else if (entry._chartFormat == ChartFormat.Chart)
+                {
+                    using var stream = file.ToReferenceStream();
+                    using var reader = new StreamReader(stream);
+                    chart = SongChart.FromDotChart(in parseSettings, reader.ReadToEnd());
+                }
+                else
+                {
+                    // UltraStar and any future formats without 5-fret tracks: nothing to score.
+                    return;
+                }
+
+                entry._starRatings = StarRatingCalculator.Compute(chart);
+            }
+            catch (Exception ex)
+            {
+                YargLogger.LogException(ex,
+                    $"Failed to compute Ghpp star rating for {entry._location}");
+            }
         }
 
         protected static bool TryGetRandomBackgroundImage<TValue>(Dictionary<string, TValue> dict, out TValue? value)
