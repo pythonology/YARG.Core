@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Ghpp.Core;
 using Ghpp.Core.Aggregation;
 using Ghpp.Core.Models;
@@ -129,7 +130,42 @@ namespace YARG.Core.Song
                 ToSamples(report.FretComplexityCurve),
                 ToSamples(report.StrumComplexityCurve),
                 ToSamples(report.SustainComplexityCurve),
-                (float) report.StarRating);
+                (float) report.StarRating,
+                ToFretChunks(report.FretChunks),
+                report.NoteIsAnchor ?? Array.Empty<bool>());
+        }
+
+        private static DifficultyFretChunk[] ToFretChunks(IReadOnlyList<FretChunkRecord> chunks)
+        {
+            if (chunks == null || chunks.Count == 0)
+            {
+                return Array.Empty<DifficultyFretChunk>();
+            }
+
+            var result = new DifficultyFretChunk[chunks.Count];
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                var c = chunks[i];
+                result[i] = new DifficultyFretChunk(
+                    c.StartNoteIndex,
+                    c.EndNoteIndex,
+                    ToYargShape(c.Shape),
+                    c.InRepeat);
+            }
+            return result;
+        }
+
+        private static DifficultyChunkShape ToYargShape(FretChunkShape shape)
+        {
+            switch (shape)
+            {
+                case FretChunkShape.Trill:   return DifficultyChunkShape.Trill;
+                case FretChunkShape.RollOn:  return DifficultyChunkShape.RollOn;
+                case FretChunkShape.RollOff: return DifficultyChunkShape.RollOff;
+                case FretChunkShape.Zig:     return DifficultyChunkShape.Zig;
+                case FretChunkShape.Held:    return DifficultyChunkShape.Held;
+                default:                     return DifficultyChunkShape.Free;
+            }
         }
 
         private static DifficultyCurveSamples ToSamples(DifficultyCurve curve)
