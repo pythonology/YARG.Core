@@ -271,8 +271,11 @@ namespace YARG.Core.Engine.Keys
 
         protected virtual void RestoreKeysSnapshot(KeysEngineSnapshot snap)
         {
-            KeyMask = snap.KeyMask;
-            PreviousKeyMask = snap.PreviousKeyMask;
+            if (!IsRemoteMirror)
+            {
+                KeyMask = snap.KeyMask;
+                PreviousKeyMask = snap.PreviousKeyMask;
+            }
             ChordStaggerTimer.Reset();
             if (snap.ChordStaggerTimerActive)
             {

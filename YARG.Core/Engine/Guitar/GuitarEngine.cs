@@ -618,10 +618,13 @@ namespace YARG.Core.Engine.Guitar
 
             RestoreGenericSnapshot(snap);
 
-            EffectiveButtonMask = snap.EffectiveButtonMask;
-            InputButtonMask     = snap.InputButtonMask;
-            LastButtonMask      = snap.LastButtonMask;
-            // StandardButtonHeld is recomputed when the engine re-processes pending input.
+            if (!IsRemoteMirror)
+            {
+                EffectiveButtonMask = snap.EffectiveButtonMask;
+                InputButtonMask     = snap.InputButtonMask;
+                LastButtonMask      = snap.LastButtonMask;
+                // StandardButtonHeld is recomputed when the engine re-processes pending input.
+            }
 
             HasFretted   = snap.HasFretted;
             HasStrummed  = snap.HasStrummed;

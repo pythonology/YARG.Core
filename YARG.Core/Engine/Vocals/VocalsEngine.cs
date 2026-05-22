@@ -397,23 +397,57 @@ namespace YARG.Core.Engine.Vocals
 
         protected override VocalsStats CloneStats() => new(EngineStats);
 
-        /// <summary>Phrases resolve as a single unit (no chord expansion); percussion is per-note.</summary>
+        /// <summary>
+        /// Vocals fire OnSyncNoteHit with the phrase's NoteIndex for both
+        /// percussion-child hits (tambourine) AND the phrase-end resolution
+        /// itself — they share a NoteIndex because percussion notes don't
+        /// advance NoteIndex on the sender. The events arrive in chart order
+        /// (every percussion in a phrase resolves before phrase.TickEnd is
+        /// crossed), so mirror that here: if the phrase still has an
+        /// unresolved percussion child, the wire event must be for that
+        /// child; once they're all resolved, the next event under this
+        /// NoteIndex is the phrase resolution. Without this two-stage walk,
+        /// tambourine hits never reach the receiver — ForceHit(phraseIndex)
+        /// would short-circuit on the first call after the phrase is marked
+        /// hit, leaving every subsequent percussion silently dropped.
+        /// </summary>
         public override void ForceHit(int noteIndex)
         {
             if (noteIndex < 0 || noteIndex >= Notes.Count) return;
-            var note = Notes[noteIndex];
-            if (note.WasHit || note.WasMissed) return;
-            HitNote(note);
+            var phrase = Notes[noteIndex];
+
+            foreach (var child in phrase.ChildNotes)
+            {
+                if (child.IsPercussion && !child.WasHit && !child.WasMissed)
+                {
+                    HitNote(child);
+                    return;
+                }
+            }
+
+            if (phrase.WasHit || phrase.WasMissed) return;
+            HitNote(phrase);
         }
 
-        /// <summary>Phrases miss at hitPercent=0; TicksHit/TicksMissed reconcile via the next
-        /// EngineStateSnapshot.</summary>
+        /// <summary>Mirror of ForceHit for the miss path. TicksHit/TicksMissed
+        /// reconcile via the next EngineStateSnapshot regardless of the 0
+        /// hitPercent used for phrase misses.</summary>
         public override void ForceMiss(int noteIndex)
         {
             if (noteIndex < 0 || noteIndex >= Notes.Count) return;
-            var note = Notes[noteIndex];
-            if (note.WasHit || note.WasMissed) return;
-            MissNote(note);
+            var phrase = Notes[noteIndex];
+
+            foreach (var child in phrase.ChildNotes)
+            {
+                if (child.IsPercussion && !child.WasHit && !child.WasMissed)
+                {
+                    MissNote(child);
+                    return;
+                }
+            }
+
+            if (phrase.WasHit || phrase.WasMissed) return;
+            MissNote(phrase);
         }
 
         // Vocal phrases end when their tick range expires; no input-release sustain.
