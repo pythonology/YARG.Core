@@ -127,6 +127,8 @@ namespace YARG.Core.Engine.Vocals
             {
                 AddScore(note);
                 OnNoteHit?.Invoke(NoteIndex, note);
+                // Percussion resolves per-note.
+                OnSyncNoteHit?.Invoke(NoteIndex);
             }
             else
             {
@@ -164,9 +166,13 @@ namespace YARG.Core.Engine.Vocals
                 }
 
                 // No matter what, we still wanna count this as a phrase hit though
-                EngineStats.IncrementNotesHit(note, CurrentTime);
+                if (IsRemoteMirror) EngineStats.IncrementNotesHit(note);
+                else                EngineStats.IncrementNotesHit(note, CurrentTime);
 
                 OnNoteHit?.Invoke(NoteIndex, note);
+
+                // Phrases resolve at most once per NoteIndex — fire unconditionally.
+                OnSyncNoteHit?.Invoke(NoteIndex);
 
                 // I want to call base.HitNote here, but I have no idea how vocals handles hit state so I'm scared to
                 NoteIndex++;
@@ -179,6 +185,7 @@ namespace YARG.Core.Engine.Vocals
             {
                 note.SetMissState(true, false);
                 OnNoteMissed?.Invoke(NoteIndex, note);
+                OnSyncNoteMissed?.Invoke(NoteIndex);
             }
             else
             {
@@ -211,6 +218,9 @@ namespace YARG.Core.Engine.Vocals
             UpdateMultiplier();
 
             OnNoteMissed?.Invoke(NoteIndex, note);
+
+            // Receiver's ForceMiss(noteIndex) routes to MissNote(note, 0).
+            OnSyncNoteMissed?.Invoke(NoteIndex);
 
             // I want to call base.MissNote here, but I have no idea how vocals handles miss state so I'm scared to
             NoteIndex++;
@@ -383,6 +393,98 @@ namespace YARG.Core.Engine.Vocals
             }
 
             EngineStats.HasCarryNote = CarriedVocalNote != null;
+        }
+
+        protected override VocalsStats CloneStats() => new(EngineStats);
+
+        /// <summary>Phrases resolve as a single unit (no chord expansion); percussion is per-note.</summary>
+        public override void ForceHit(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count) return;
+            var note = Notes[noteIndex];
+            if (note.WasHit || note.WasMissed) return;
+            HitNote(note);
+        }
+
+        /// <summary>Phrases miss at hitPercent=0; TicksHit/TicksMissed reconcile via the next
+        /// EngineStateSnapshot.</summary>
+        public override void ForceMiss(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count) return;
+            var note = Notes[noteIndex];
+            if (note.WasHit || note.WasMissed) return;
+            MissNote(note);
+        }
+
+        // Vocal phrases end when their tick range expires; no input-release sustain.
+        public override void ForceReleaseSustain(int noteIndex)
+        {
+        }
+
+        public override EngineSnapshot CreateSnapshot()
+        {
+            var snap = new VocalsEngineSnapshot();
+            CaptureGenericSnapshot(snap);
+
+            snap.HasPhraseTicksTotal = PhraseTicksTotal.HasValue;
+            snap.PhraseTicksTotal    = PhraseTicksTotal ?? 0u;
+            snap.PhraseTicksHit      = PhraseTicksHit;
+            snap.LastSingTick        = LastSingTick;
+            snap.PitchSang           = PitchSang;
+            snap.HasSang             = HasSang;
+
+            // Carried notes are always children of a phrase near NoteIndex; localized search suffices.
+            snap.CarriedVocalNotePhraseIndex = -1;
+            snap.CarriedVocalNoteChildIndex  = -1;
+            if (CarriedVocalNote != null)
+            {
+                for (int p = 0; p < Notes.Count; p++)
+                {
+                    var phrase = Notes[p];
+                    var children = phrase.ChildNotes;
+                    for (int c = 0; c < children.Count; c++)
+                    {
+                        if (ReferenceEquals(children[c], CarriedVocalNote))
+                        {
+                            snap.CarriedVocalNotePhraseIndex = p;
+                            snap.CarriedVocalNoteChildIndex  = c;
+                            p = Notes.Count; // break outer
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return snap;
+        }
+
+        public override void RestoreSnapshot(EngineSnapshot snapshot)
+        {
+            if (snapshot is not VocalsEngineSnapshot snap)
+            {
+                throw new InvalidOperationException(
+                    "VocalsEngine.RestoreSnapshot: snapshot must be a VocalsEngineSnapshot.");
+            }
+            RestoreGenericSnapshot(snap);
+
+            PhraseTicksTotal = snap.HasPhraseTicksTotal ? snap.PhraseTicksTotal : (uint?) null;
+            PhraseTicksHit   = snap.PhraseTicksHit;
+            LastSingTick     = snap.LastSingTick;
+            PitchSang        = snap.PitchSang;
+            HasSang          = snap.HasSang;
+
+            CarriedVocalNote = null;
+            if (snap.CarriedVocalNotePhraseIndex >= 0 &&
+                snap.CarriedVocalNotePhraseIndex < Notes.Count)
+            {
+                var phrase = Notes[snap.CarriedVocalNotePhraseIndex];
+                var children = phrase.ChildNotes;
+                if (snap.CarriedVocalNoteChildIndex >= 0 &&
+                    snap.CarriedVocalNoteChildIndex < children.Count)
+                {
+                    CarriedVocalNote = children[snap.CarriedVocalNoteChildIndex];
+                }
+            }
         }
     }
 }

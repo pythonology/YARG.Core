@@ -137,7 +137,8 @@ namespace YARG.Core.Engine.Keys
                 IncrementCombo();
             }
 
-            EngineStats.IncrementNotesHit(note, CurrentTime);
+            if (IsRemoteMirror) EngineStats.IncrementNotesHit(note);
+            else                EngineStats.IncrementNotesHit(note, CurrentTime);
 
             UpdateMultiplier();
 
@@ -149,6 +150,21 @@ namespace YARG.Core.Engine.Keys
             }
 
             OnNoteHit?.Invoke(NoteIndex, note);
+
+            // Fire once per *chord*. HitNote runs per subnote; the wire model carries the
+            // chord as one (noteIndex, hit/miss). Hit only if every subnote landed (matches
+            // IncrementCombo — combo only moves when fully hit).
+            if (note.ParentOrSelf.WasFullyHitOrMissed())
+            {
+                if (note.ParentOrSelf.WasFullyHit())
+                {
+                    OnSyncNoteHit?.Invoke(NoteIndex);
+                }
+                else
+                {
+                    OnSyncNoteMissed?.Invoke(NoteIndex);
+                }
+            }
             base.HitNote(note);
         }
 
@@ -222,6 +238,20 @@ namespace YARG.Core.Engine.Keys
             }
 
             OnNoteMissed?.Invoke(NoteIndex, note);
+
+            // One-per-chord (mirror of HitNote). A miss can still leave the chord WasFullyHit
+            // if every prior subnote landed; prefer the hit outcome.
+            if (note.ParentOrSelf.WasFullyHitOrMissed())
+            {
+                if (note.ParentOrSelf.WasFullyHit())
+                {
+                    OnSyncNoteHit?.Invoke(NoteIndex);
+                }
+                else
+                {
+                    OnSyncNoteMissed?.Invoke(NoteIndex);
+                }
+            }
             base.HitNote(note);
         }
 
@@ -266,5 +296,28 @@ namespace YARG.Core.Engine.Keys
         }
 
         protected override bool IsKeyInTime(ProKeysNote note, double frontEnd) => IsKeyInTime(note, note.Key, frontEnd);
+
+        protected override void CaptureKeysSnapshot(KeysEngineSnapshot snap)
+        {
+            base.CaptureKeysSnapshot(snap);
+            snap.FatFingerTimerActive = FatFingerTimer.IsActive;
+            snap.FatFingerTimerStartTime = FatFingerTimer.StartTime;
+            snap.FatFingerKey = FatFingerKey ?? -1;
+            snap.FatFingerNoteIndex = FatFingerNote != null ? Notes.IndexOf(FatFingerNote) : -1;
+        }
+
+        protected override void RestoreKeysSnapshot(KeysEngineSnapshot snap)
+        {
+            base.RestoreKeysSnapshot(snap);
+            FatFingerTimer.Reset();
+            if (snap.FatFingerTimerActive)
+            {
+                FatFingerTimer.Start(snap.FatFingerTimerStartTime);
+            }
+            FatFingerKey = snap.FatFingerKey < 0 ? (int?) null : snap.FatFingerKey;
+            FatFingerNote = (snap.FatFingerNoteIndex >= 0 && snap.FatFingerNoteIndex < Notes.Count)
+                ? Notes[snap.FatFingerNoteIndex]
+                : null;
+        }
     }
 }

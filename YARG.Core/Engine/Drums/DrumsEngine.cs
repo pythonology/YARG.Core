@@ -122,6 +122,9 @@ namespace YARG.Core.Engine.Drums
             UpdateMultiplier();
 
             OnOverhit?.Invoke();
+            // Routed through OnSyncOverstrum so the wire format carries one "wrong input"
+            // packet across instruments.
+            OnSyncOverstrum?.Invoke(CurrentTime);
         }
 
         protected override void HitNote(DrumNote note)
@@ -186,7 +189,8 @@ namespace YARG.Core.Engine.Drums
 
             IncrementCombo();
 
-            EngineStats.IncrementNotesHit(note, CurrentTime);
+            if (IsRemoteMirror) EngineStats.IncrementNotesHit(note);
+            else                EngineStats.IncrementNotesHit(note, CurrentTime);
 
             UpdateMultiplier();
 
@@ -197,6 +201,23 @@ namespace YARG.Core.Engine.Drums
             if (!activationAutoHit)
             {
                 OnNoteHit?.Invoke(NoteIndex, note);
+            }
+
+            // Fire once per *chord*. HitNote/MissNote run per subnote but the wire model is
+            // one (noteIndex, hit/miss) tuple per chord. Chord-level outcome via WasFullyHit so
+            // any-missed-subnote → miss on the receiver (matches IncrementCombo: a partial
+            // chord doesn't extend combo on most charts). SP-activation auto-hits are
+            // reproducible from the StarPowerActivated event.
+            if (!activationAutoHit && note.ParentOrSelf.WasFullyHitOrMissed())
+            {
+                if (note.ParentOrSelf.WasFullyHit())
+                {
+                    OnSyncNoteHit?.Invoke(NoteIndex);
+                }
+                else
+                {
+                    OnSyncNoteMissed?.Invoke(NoteIndex);
+                }
             }
 
             base.HitNote(note);
@@ -355,6 +376,20 @@ namespace YARG.Core.Engine.Drums
             UpdateMultiplier();
 
             OnNoteMissed?.Invoke(NoteIndex, note);
+
+            // One-per-chord (mirror of HitNote). A miss can still leave the chord WasFullyHit
+            // if every prior subnote landed; prefer the hit outcome.
+            if (note.ParentOrSelf.WasFullyHitOrMissed())
+            {
+                if (note.ParentOrSelf.WasFullyHit())
+                {
+                    OnSyncNoteHit?.Invoke(NoteIndex);
+                }
+                else
+                {
+                    OnSyncNoteMissed?.Invoke(NoteIndex);
+                }
+            }
             base.MissNote(note);
         }
 
@@ -557,6 +592,66 @@ namespace YARG.Core.Engine.Drums
             };
         }
 
-        protected override bool CanSustainHold(DrumNote note) => throw new InvalidOperationException();
+        protected override bool CanSustainHold(DrumNote note)
+        {
+            // Drums have no sustains; throw is defensive against future regressions.
+            throw new InvalidOperationException("DrumsEngine has no sustains.");
+        }
+
+        /// <summary>The wire "Overstrum" maps to <c>Overhit()</c> for drums.</summary>
+        public override void ForceOverstrum(double songTime)
+        {
+            if (songTime > CurrentTime)
+            {
+                Update(songTime);
+            }
+            Overhit();
+        }
+
+        /// <summary>Wire model carries one (noteIndex, hit) per chord; HitNote is per-subnote,
+        /// so the mirror expands the chord here.</summary>
+        public override void ForceHit(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count) return;
+            var parent = Notes[noteIndex];
+            foreach (var sub in parent.AllNotes)
+            {
+                if (sub.WasHit || sub.WasMissed) continue;
+                HitNote(sub);
+            }
+        }
+
+        /// <summary>Same chord expansion as <see cref="ForceHit"/>. Covers "partial hit on the
+        /// sender → chord-level miss on the wire"; per-subnote flags reconcile via the next
+        /// EngineStateSnapshot.</summary>
+        public override void ForceMiss(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count) return;
+            var parent = Notes[noteIndex];
+            foreach (var sub in parent.AllNotes)
+            {
+                if (sub.WasHit || sub.WasMissed) continue;
+                MissNote(sub);
+            }
+        }
+
+        protected override DrumsStats CloneStats() => new(EngineStats);
+
+        public override EngineSnapshot CreateSnapshot()
+        {
+            var snap = new DrumsEngineSnapshot();
+            CaptureGenericSnapshot(snap);
+            return snap;
+        }
+
+        public override void RestoreSnapshot(EngineSnapshot snapshot)
+        {
+            if (snapshot is not DrumsEngineSnapshot snap)
+            {
+                throw new InvalidOperationException(
+                    "DrumsEngine.RestoreSnapshot: snapshot must be a DrumsEngineSnapshot.");
+            }
+            RestoreGenericSnapshot(snap);
+        }
     }
 }

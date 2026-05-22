@@ -73,6 +73,28 @@ namespace YARG.Core.Engine.Drums
             DynamicsBonus = stream.Read<int>(Endianness.Little);
         }
 
+        // Required because base CopyFrom only handles its own fields. Without this the
+        // snapshot's OverhitsByAction is dropped and remote drum per-pad overhits show zeros
+        // (RecordOverhit on the mirror is called with no Action, so the live dict stays empty).
+        public override void CopyFrom(BaseStats source)
+        {
+            base.CopyFrom(source);
+            if (source is not DrumsStats other) return;
+
+            Overhits      = other.Overhits;
+            GhostsHit     = other.GhostsHit;
+            TotalGhosts   = other.TotalGhosts;
+            AccentsHit    = other.AccentsHit;
+            TotalAccents  = other.TotalAccents;
+            DynamicsBonus = other.DynamicsBonus;
+
+            OverhitsByAction.Clear();
+            foreach (var kv in other.OverhitsByAction)
+            {
+                OverhitsByAction[kv.Key] = kv.Value;
+            }
+        }
+
         public override void Reset()
         {
             base.Reset();

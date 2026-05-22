@@ -41,6 +41,17 @@ namespace YARG.Core.Engine.Guitar
             GhostInputs = stream.Read<int>(Endianness.Little);
         }
 
+        public override void CopyFrom(BaseStats source)
+        {
+            base.CopyFrom(source);
+            if (source is GuitarStats g)
+            {
+                Overstrums = g.Overstrums;
+                HoposStrummed = g.HoposStrummed;
+                GhostInputs = g.GhostInputs;
+            }
+        }
+
         public override void Reset()
         {
             base.Reset();

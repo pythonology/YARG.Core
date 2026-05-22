@@ -83,6 +83,7 @@ namespace YARG.Core.Engine.Guitar.Engines
             else if (action is GuitarAction.Whammy)
             {
                 StartWhammyTimer(gameInput.Time);
+                OnSyncWhammyAxis?.Invoke(gameInput.Time, gameInput.Axis);
             }
             else if (action is GuitarAction.StrumDown or GuitarAction.StrumUp && gameInput.Button)
             {
@@ -229,6 +230,11 @@ namespace YARG.Core.Engine.Guitar.Engines
 
         protected override void CheckForNoteHit()
         {
+            // Mirrors are driven by ForceHit / ForceMiss. Without this guard, an extended
+            // commit deadline (>~70 ms past note.Time, e.g. mode-change extension) would race
+            // the engine's own miss-detection and ForceHit would no-op on an already-resolved note.
+            if (IsRemoteMirror) return;
+
             for (int i = NoteIndex; i < Notes.Count; i++)
             {
                 bool isFirstNoteInWindow = i == NoteIndex;

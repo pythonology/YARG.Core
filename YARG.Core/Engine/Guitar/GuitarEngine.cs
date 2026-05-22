@@ -197,10 +197,16 @@ namespace YARG.Core.Engine.Guitar
             UpdateMultiplier();
 
             OnOverstrum?.Invoke();
+            OnSyncOverstrum?.Invoke(CurrentTime);
         }
 
         protected override bool CanSustainHold(GuitarNote note)
         {
+            // Mirrors have no input queue (EffectiveButtonMask stays at OPEN_MASK), so the
+            // "buttons held" check would drop every sustain. ForceReleaseSustain handles
+            // explicit releases; natural ends still go through the isEndOfSustain path.
+            if (IsRemoteMirror) return true;
+
             var mask = note.IsDisjoint ? note.DisjointMask : note.NoteMask;
 
             var buttonsMasked = EffectiveButtonMask;
@@ -274,7 +280,8 @@ namespace YARG.Core.Engine.Guitar
 
             IncrementCombo();
 
-            EngineStats.IncrementNotesHit(note, CurrentTime);
+            if (IsRemoteMirror) EngineStats.IncrementNotesHit(note);
+            else                EngineStats.IncrementNotesHit(note, CurrentTime);
 
             UpdateMultiplier();
 
@@ -300,6 +307,7 @@ namespace YARG.Core.Engine.Guitar
             WasNoteGhosted = false;
 
             OnNoteHit?.Invoke(NoteIndex, note);
+            OnSyncNoteHit?.Invoke(NoteIndex);
             base.HitNote(note);
         }
 
@@ -357,6 +365,7 @@ namespace YARG.Core.Engine.Guitar
             UpdateMultiplier();
 
             OnNoteMissed?.Invoke(NoteIndex, note);
+            OnSyncNoteMissed?.Invoke(NoteIndex);
             base.MissNote(note);
         }
 
@@ -555,6 +564,85 @@ namespace YARG.Core.Engine.Guitar
                     GuitarAction.StrumDown => true,
                 _ => false,
             };
+        }
+
+        protected override GuitarStats CloneStats() => new(EngineStats);
+
+        /// <summary>Routes through Overstrum() so all side-effects run identically to a local
+        /// overstrum. Advances to <paramref name="songTime"/> first so dropped-sustain
+        /// timestamps line up.</summary>
+        public override void ForceOverstrum(double songTime)
+        {
+            if (songTime > CurrentTime)
+            {
+                Update(songTime);
+            }
+            Overstrum();
+        }
+
+        public override EngineSnapshot CreateSnapshot()
+        {
+            var snap = new GuitarEngineSnapshot();
+            CaptureGenericSnapshot(snap);
+
+            snap.EffectiveButtonMask = EffectiveButtonMask;
+            snap.InputButtonMask     = InputButtonMask;
+            snap.LastButtonMask      = LastButtonMask;
+            snap.StandardButtonHeld  = StandardButtonHeld;
+
+            snap.HasFretted   = HasFretted;
+            snap.HasStrummed  = HasStrummed;
+            snap.HasTapped    = HasTapped;
+            snap.HasWhammied  = HasWhammied;
+            snap.IsFretPress  = IsFretPress;
+
+            snap.WasNoteGhosted = WasNoteGhosted;
+
+            snap.HopoLeniencyTimerActive    = HopoLeniencyTimer.IsActive;
+            snap.HopoLeniencyTimerStartTime = HopoLeniencyTimer.StartTime;
+            snap.StrumLeniencyTimerActive    = StrumLeniencyTimer.IsActive;
+            snap.StrumLeniencyTimerStartTime = StrumLeniencyTimer.StartTime;
+
+            snap.FrontEndExpireTime = FrontEndExpireTime;
+
+            return snap;
+        }
+
+        public override void RestoreSnapshot(EngineSnapshot snapshot)
+        {
+            if (snapshot is not GuitarEngineSnapshot snap)
+            {
+                throw new System.InvalidOperationException(
+                    "GuitarEngine.RestoreSnapshot: snapshot must be a GuitarEngineSnapshot.");
+            }
+
+            RestoreGenericSnapshot(snap);
+
+            EffectiveButtonMask = snap.EffectiveButtonMask;
+            InputButtonMask     = snap.InputButtonMask;
+            LastButtonMask      = snap.LastButtonMask;
+            // StandardButtonHeld is recomputed when the engine re-processes pending input.
+
+            HasFretted   = snap.HasFretted;
+            HasStrummed  = snap.HasStrummed;
+            HasTapped    = snap.HasTapped;
+            HasWhammied  = snap.HasWhammied;
+            IsFretPress  = snap.IsFretPress;
+
+            WasNoteGhosted = snap.WasNoteGhosted;
+
+            HopoLeniencyTimer.Reset();
+            if (snap.HopoLeniencyTimerActive)
+            {
+                HopoLeniencyTimer.Start(snap.HopoLeniencyTimerStartTime);
+            }
+            StrumLeniencyTimer.Reset();
+            if (snap.StrumLeniencyTimerActive)
+            {
+                StrumLeniencyTimer.Start(snap.StrumLeniencyTimerStartTime);
+            }
+
+            FrontEndExpireTime = snap.FrontEndExpireTime;
         }
     }
 }

@@ -104,7 +104,8 @@ namespace YARG.Core.Engine.Keys
                 IncrementCombo();
             }
 
-            EngineStats.IncrementNotesHit(note, CurrentTime);
+            if (IsRemoteMirror) EngineStats.IncrementNotesHit(note);
+            else                EngineStats.IncrementNotesHit(note, CurrentTime);
 
             UpdateMultiplier();
 
@@ -116,6 +117,19 @@ namespace YARG.Core.Engine.Keys
             }
 
             OnNoteHit?.Invoke(NoteIndex, note);
+
+            // One-per-chord; see ProKeysEngine for rationale.
+            if (note.ParentOrSelf.WasFullyHitOrMissed())
+            {
+                if (note.ParentOrSelf.WasFullyHit())
+                {
+                    OnSyncNoteHit?.Invoke(NoteIndex);
+                }
+                else
+                {
+                    OnSyncNoteMissed?.Invoke(NoteIndex);
+                }
+            }
             base.HitNote(note);
         }
 
@@ -189,6 +203,19 @@ namespace YARG.Core.Engine.Keys
             }
 
             OnNoteMissed?.Invoke(NoteIndex, note);
+
+            // One-per-chord (mirror of HitNote).
+            if (note.ParentOrSelf.WasFullyHitOrMissed())
+            {
+                if (note.ParentOrSelf.WasFullyHit())
+                {
+                    OnSyncNoteHit?.Invoke(NoteIndex);
+                }
+                else
+                {
+                    OnSyncNoteMissed?.Invoke(NoteIndex);
+                }
+            }
             base.MissNote(note);
         }
 

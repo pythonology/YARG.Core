@@ -28,6 +28,15 @@ namespace YARG.Core.Engine
         public delegate void ComboIncrementEvent(int amount);
 
         public delegate void UnisonBonusAwardedEvent();
+
+        // Online sync hooks
+        public delegate void SyncNoteMissedEvent(int noteIndex);
+        public delegate void SyncNoteHitEvent(int noteIndex);
+        public delegate void SyncStarPowerActivatedEvent(double songTime);
+        public delegate void SyncWhammyAxisEvent(double songTime, float value);
+        public delegate void SyncSustainReleasedEvent(int noteIndex, double songTime);
+        public delegate void SyncOverstrumEvent(double songTime);
+
         public StarPowerStatusEvent? OnStarPowerStatus;
         public SoloStartEvent?       OnSoloStart;
         public SoloEndEvent?         OnSoloEnd;
@@ -36,6 +45,12 @@ namespace YARG.Core.Engine
         public ComboResetEvent?      OnComboReset;
         public ComboIncrementEvent?  OnComboIncrement;
         public UnisonBonusAwardedEvent? OnUnisonBonusAwarded;
+        public SyncNoteMissedEvent?         OnSyncNoteMissed;
+        public SyncNoteHitEvent?            OnSyncNoteHit;
+        public SyncStarPowerActivatedEvent? OnSyncStarPowerActivated;
+        public SyncWhammyAxisEvent?         OnSyncWhammyAxis;
+        public SyncSustainReleasedEvent?    OnSyncSustainReleased;
+        public SyncOverstrumEvent?          OnSyncOverstrum;
 
         public bool CanStarPowerActivate => BaseStats.StarPowerTickAmount >= TicksPerHalfSpBar;
         public int BaseScore { get; protected set; }
@@ -186,6 +201,9 @@ namespace YARG.Core.Engine
         {
             return SyncTrack.TimeToTick(time);
         }
+
+        /// <summary>True when driven by the online prediction layer.</summary>
+        public bool IsRemoteMirror { get; set; }
 
         public void Update(double time)
         {
@@ -432,6 +450,156 @@ namespace YARG.Core.Engine
             IsStarPowerInputActive = false;
         }
 
+        public abstract EngineSnapshot CreateSnapshot();
+
+        /// <summary>Restores state from a snapshot.</summary>
+        public abstract void RestoreSnapshot(EngineSnapshot snapshot);
+
+        public abstract void ForceHit(int noteIndex);
+
+        public abstract void ForceMiss(int noteIndex);
+
+        public abstract void ForceReleaseSustain(int noteIndex);
+
+        public void ForceStarPowerActivation(double songTime)
+        {
+            if (songTime > CurrentTime)
+            {
+                Update(songTime);
+            }
+            ActivateStarPower();
+        }
+
+        public virtual void ForceWhammyAxis(double songTime, float value)
+        {
+        }
+
+        public virtual void ForceOverstrum(double songTime)
+        {
+        }
+
+        protected void CaptureBaseSnapshot(EngineSnapshot snapshot)
+        {
+            snapshot.NoteIndex                  = NoteIndex;
+            snapshot.CurrentTime                = CurrentTime;
+            snapshot.LastUpdateTime             = LastUpdateTime;
+            snapshot.LastQueuedInputTime        = LastQueuedInputTime;
+
+            snapshot.CurrentTick                = CurrentTick;
+            snapshot.LastTick                   = LastTick;
+            snapshot.FirstWhammyTick            = FirstWhammyTick;
+
+            snapshot.CurrentSoloIndex           = CurrentSoloIndex;
+            snapshot.CurrentStarIndex           = CurrentStarIndex;
+            snapshot.CurrentWaitCountdownIndex  = CurrentWaitCountdownIndex;
+            snapshot.CurrentCodaIndex           = CurrentCodaIndex;
+
+            snapshot.IsSoloActive               = IsSoloActive;
+            snapshot.IsCodaActive               = IsCodaActive;
+            snapshot.CodaHasStarted             = CodaHasStarted;
+            snapshot.IsWaitCountdownActive      = IsWaitCountdownActive;
+            snapshot.IsStarPowerInputActive     = IsStarPowerInputActive;
+
+            snapshot.BaseScore                  = BaseScore;
+            snapshot.BaseNoteScore              = BaseNoteScore;
+
+            snapshot.WasSpSustainActive             = WasSpSustainActive;
+            snapshot.StarPowerTickPosition          = StarPowerTickPosition;
+            snapshot.PreviousStarPowerTickPosition  = PreviousStarPowerTickPosition;
+            snapshot.StarPowerTickActivationPosition = StarPowerTickActivationPosition;
+            snapshot.StarPowerTickEndPosition       = StarPowerTickEndPosition;
+            snapshot.StarPowerActivationTime        = StarPowerActivationTime;
+            snapshot.StarPowerEndTime               = StarPowerEndTime;
+            snapshot.BaseTimeInStarPower            = BaseTimeInStarPower;
+
+            snapshot.StarPowerWhammyTimerActive     = StarPowerWhammyTimer.IsActive;
+            snapshot.StarPowerWhammyTimerStartTime  = StarPowerWhammyTimer.StartTime;
+
+            snapshot.TotalLanes                 = TotalLanes;
+            snapshot.CurrentLaneIndex           = CurrentLaneIndex;
+            snapshot.RequiredLaneNote           = RequiredLaneNote;
+            snapshot.NextTrillNote              = NextTrillNote;
+            snapshot.LaneExpireTime             = LaneExpireTime;
+
+            snapshot.PendingInputs = InputQueue.Count == 0
+                ? System.Array.Empty<GameInput>()
+                : InputQueue.ToArray();
+
+            if (_scheduledUpdates.Count == 0)
+            {
+                snapshot.PendingUpdates = System.Array.Empty<EngineSnapshot.ScheduledUpdate>();
+            }
+            else
+            {
+                var updates = new EngineSnapshot.ScheduledUpdate[_scheduledUpdates.Count];
+                for (int i = 0; i < _scheduledUpdates.Count; i++)
+                {
+                    var u = _scheduledUpdates[i];
+                    updates[i] = new EngineSnapshot.ScheduledUpdate(u.Time, u.Reason);
+                }
+                snapshot.PendingUpdates = updates;
+            }
+        }
+
+        protected void RestoreBaseSnapshot(EngineSnapshot snapshot)
+        {
+            NoteIndex                  = snapshot.NoteIndex;
+            CurrentTime                = snapshot.CurrentTime;
+            LastUpdateTime             = snapshot.LastUpdateTime;
+            LastQueuedInputTime        = snapshot.LastQueuedInputTime;
+
+            CurrentTick                = snapshot.CurrentTick;
+            LastTick                   = snapshot.LastTick;
+            FirstWhammyTick            = snapshot.FirstWhammyTick;
+
+            CurrentSoloIndex           = snapshot.CurrentSoloIndex;
+            CurrentStarIndex           = snapshot.CurrentStarIndex;
+            CurrentWaitCountdownIndex  = snapshot.CurrentWaitCountdownIndex;
+            CurrentCodaIndex           = snapshot.CurrentCodaIndex;
+
+            IsSoloActive               = snapshot.IsSoloActive;
+            IsCodaActive               = snapshot.IsCodaActive;
+            CodaHasStarted             = snapshot.CodaHasStarted;
+            IsWaitCountdownActive      = snapshot.IsWaitCountdownActive;
+            IsStarPowerInputActive     = snapshot.IsStarPowerInputActive;
+
+            BaseScore                  = snapshot.BaseScore;
+            BaseNoteScore              = snapshot.BaseNoteScore;
+
+            WasSpSustainActive             = snapshot.WasSpSustainActive;
+            StarPowerTickPosition          = snapshot.StarPowerTickPosition;
+            PreviousStarPowerTickPosition  = snapshot.PreviousStarPowerTickPosition;
+            StarPowerTickActivationPosition = snapshot.StarPowerTickActivationPosition;
+            StarPowerTickEndPosition       = snapshot.StarPowerTickEndPosition;
+            StarPowerActivationTime        = snapshot.StarPowerActivationTime;
+            StarPowerEndTime               = snapshot.StarPowerEndTime;
+            BaseTimeInStarPower            = snapshot.BaseTimeInStarPower;
+
+            StarPowerWhammyTimer.Reset();
+            if (snapshot.StarPowerWhammyTimerActive)
+            {
+                StarPowerWhammyTimer.Start(snapshot.StarPowerWhammyTimerStartTime);
+            }
+
+            TotalLanes                 = snapshot.TotalLanes;
+            CurrentLaneIndex           = snapshot.CurrentLaneIndex;
+            RequiredLaneNote           = snapshot.RequiredLaneNote;
+            NextTrillNote              = snapshot.NextTrillNote;
+            LaneExpireTime             = snapshot.LaneExpireTime;
+
+            InputQueue.Clear();
+            foreach (var input in snapshot.PendingInputs)
+            {
+                InputQueue.Enqueue(input);
+            }
+
+            _scheduledUpdates.Clear();
+            foreach (var u in snapshot.PendingUpdates)
+            {
+                _scheduledUpdates.Add(new EngineFrameUpdate(u.Time, u.Reason));
+            }
+        }
+
         protected abstract void MutateStateWithInput(GameInput gameInput);
 
         /// <summary>
@@ -486,6 +654,8 @@ namespace YARG.Core.Engine
             UpdateMultiplier();
 
             OnStarPowerStatus?.Invoke(true);
+            // The single SP inactive→active transition path across all subclasses.
+            OnSyncStarPowerActivated?.Invoke(CurrentTime);
         }
 
         protected void ReleaseStarPower()

@@ -48,6 +48,19 @@ namespace YARG.Core.Engine.Vocals
             HasCarryNote = stream.ReadBoolean();
         }
 
+        public override void CopyFrom(BaseStats source)
+        {
+            base.CopyFrom(source);
+            if (source is not VocalsStats other)
+            {
+                return;
+            }
+
+            TicksHit = other.TicksHit;
+            TicksMissed = other.TicksMissed;
+            HasCarryNote = other.HasCarryNote;
+        }
+
         public override void Reset()
         {
             base.Reset();

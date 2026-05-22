@@ -178,6 +178,18 @@ namespace YARG.Core.Engine.Keys
             UpdateMultiplier();
 
             OnOverhit?.Invoke(key);
+            // Keys' overhit is the wire-level "Overstrum".
+            OnSyncOverstrum?.Invoke(CurrentTime);
+        }
+
+        /// <summary>Passes <c>-1</c> as key since the wire model has no per-key context.</summary>
+        public override void ForceOverstrum(double songTime)
+        {
+            if (songTime > CurrentTime)
+            {
+                Update(songTime);
+            }
+            Overhit(-1);
         }
 
         protected abstract override bool CanSustainHold(TNoteType note);
@@ -193,5 +205,81 @@ namespace YARG.Core.Engine.Keys
         }
 
         protected abstract bool IsKeyInTime(TNoteType note, double frontEnd);
+
+        protected override KeysStats CloneStats() => new(EngineStats);
+
+        /// <summary>Chord-expansion mirror of drums' ForceHit — see <see cref="Drums.DrumsEngine"/>.</summary>
+        public override void ForceHit(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count) return;
+            var parent = Notes[noteIndex];
+            foreach (var sub in parent.AllNotes)
+            {
+                if (sub.WasHit || sub.WasMissed) continue;
+                HitNote(sub);
+            }
+        }
+
+        public override void ForceMiss(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count) return;
+            var parent = Notes[noteIndex];
+            foreach (var sub in parent.AllNotes)
+            {
+                if (sub.WasHit || sub.WasMissed) continue;
+                MissNote(sub);
+            }
+        }
+
+        // Keys have no input-gesture sustain release (the key bitmask just changes); next
+        // EngineStateSnapshot reconciles any drift.
+        public override void ForceReleaseSustain(int noteIndex)
+        {
+        }
+
+        public override EngineSnapshot CreateSnapshot()
+        {
+            var snap = new KeysEngineSnapshot();
+            CaptureGenericSnapshot(snap);
+            CaptureKeysSnapshot(snap);
+            return snap;
+        }
+
+        public override void RestoreSnapshot(EngineSnapshot snapshot)
+        {
+            if (snapshot is not KeysEngineSnapshot snap)
+            {
+                throw new System.InvalidOperationException(
+                    "KeysEngine.RestoreSnapshot: snapshot must be a KeysEngineSnapshot.");
+            }
+            RestoreGenericSnapshot(snap);
+            RestoreKeysSnapshot(snap);
+        }
+
+        /// <summary>Subclasses (Pro/5-Lane) override to add their own fields.</summary>
+        protected virtual void CaptureKeysSnapshot(KeysEngineSnapshot snap)
+        {
+            snap.KeyMask = KeyMask;
+            snap.PreviousKeyMask = PreviousKeyMask;
+            snap.ChordStaggerTimerActive = ChordStaggerTimer.IsActive;
+            snap.ChordStaggerTimerStartTime = ChordStaggerTimer.StartTime;
+            // Pro-keys fields default to inactive; ProKeysEngine override fills them.
+            snap.FatFingerTimerActive = false;
+            snap.FatFingerKey = -1;
+            snap.FatFingerNoteIndex = -1;
+        }
+
+        protected virtual void RestoreKeysSnapshot(KeysEngineSnapshot snap)
+        {
+            KeyMask = snap.KeyMask;
+            PreviousKeyMask = snap.PreviousKeyMask;
+            ChordStaggerTimer.Reset();
+            if (snap.ChordStaggerTimerActive)
+            {
+                ChordStaggerTimer.Start(snap.ChordStaggerTimerStartTime);
+            }
+            // KeyPressTimes are intra-tick only and reset to DEFAULT_PRESS_TIME after each note —
+            // between ticks they're always at default, so the snapshot doesn't capture them.
+        }
     }
 }

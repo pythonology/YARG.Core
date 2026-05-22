@@ -13,6 +13,7 @@ namespace YARG.Core.Engine
         Dictionary<int, EngineContainer> _allEnginesById = new();
 
         public List<EngineContainer> Engines => _allEngines;
+        public bool BandFeaturesEnabled { get; set; }
 
         private SongChart?               _chart;
 

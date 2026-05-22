@@ -36,6 +36,16 @@ namespace YARG.Core.Engine.Keys
             FatFingersIgnored = stream.Read<int>(Endianness.Little);
         }
 
+        // Snapshot reconciliation — see DrumsStats.CopyFrom for rationale.
+        public override void CopyFrom(BaseStats source)
+        {
+            base.CopyFrom(source);
+            if (source is not KeysStats other) return;
+
+            Overhits          = other.Overhits;
+            FatFingersIgnored = other.FatFingersIgnored;
+        }
+
         public override void Reset()
         {
             base.Reset();

@@ -298,6 +298,44 @@ namespace YARG.Core.Engine
             // Stars = reader.ReadInt32();
         }
 
+        /// <summary>Copy mutable fields from <paramref name="source"/> in-place. Engines hold
+        /// stats by readonly reference, so rollback restores via copy rather than swap.</summary>
+        public virtual void CopyFrom(BaseStats source)
+        {
+            CommittedScore = source.CommittedScore;
+            PendingScore = source.PendingScore;
+            NoteScore = source.NoteScore;
+            SustainScore = source.SustainScore;
+            MultiplierScore = source.MultiplierScore;
+            BandBonusScore = source.BandBonusScore;
+            Combo = source.Combo;
+            MaxCombo = source.MaxCombo;
+            ScoreMultiplier = source.ScoreMultiplier;
+            BandMultiplier = source.BandMultiplier;
+            NotesHit = source.NotesHit;
+            LanedNotesHit = source.LanedNotesHit;
+            TotalNotes = source.TotalNotes;
+            TotalChords = source.TotalChords;
+            StarPowerTickAmount = source.StarPowerTickAmount;
+            TotalStarPowerTicks = source.TotalStarPowerTicks;
+            TotalStarPowerBarsFilled = source.TotalStarPowerBarsFilled;
+            StarPowerActivationCount = source.StarPowerActivationCount;
+            TimeInStarPower = source.TimeInStarPower;
+            StarPowerWhammyTicks = source.StarPowerWhammyTicks;
+            IsStarPowerActive = source.IsStarPowerActive;
+            StarPowerPhrasesHit = source.StarPowerPhrasesHit;
+            TotalStarPowerPhrases = source.TotalStarPowerPhrases;
+            SoloBonuses = source.SoloBonuses;
+            MaxSoloBonusPoints = source.MaxSoloBonusPoints;
+            CodaBonuses = source.CodaBonuses;
+            StarPowerScore = source.StarPowerScore;
+            Stars = source.Stars;
+            TotalOffset = source.TotalOffset;
+            AverageOffset = source.AverageOffset;
+            OffsetSamples.Clear();
+            OffsetSamples.AddRange(source.OffsetSamples);
+        }
+
         public virtual void Reset()
         {
             CommittedScore = 0;
@@ -378,6 +416,21 @@ namespace YARG.Core.Engine
             return offsetNotes > 0 ? TotalOffset / offsetNotes : 0.0;
         }
 
+        public double GetTotalOffset() => TotalOffset;
+
+        /// <summary>Replace the offset histogram with sender-authoritative values during wire
+        /// snapshot deserialization.</summary>
+        public void SetOffsetData(double totalOffset, IReadOnlyList<double> samples)
+        {
+            TotalOffset = totalOffset;
+            OffsetSamples.Clear();
+
+            foreach (var t in samples)
+            {
+                OffsetSamples.Add(t);
+            }
+        }
+
         /// <summary>
         /// Returns per-note timing offsets used for score-screen timing distribution visualization.
         /// Values are in seconds, where negative is early and positive is late.
@@ -401,6 +454,21 @@ namespace YARG.Core.Engine
             {
                 LanedNotesHit++;
             }
+        }
+
+        public void IncrementNotesHit<NoteType>(NoteType note) where NoteType : Note<NoteType>
+        {
+            NotesHit++;
+            if (note.IsLane)
+            {
+                LanedNotesHit++;
+            }
+        }
+
+        public void AddOffsetSample(double offset)
+        {
+            TotalOffset += offset;
+            OffsetSamples.Add(offset);
         }
     }
 }

@@ -129,6 +129,218 @@ namespace YARG.Core.Engine
             return starScoreThresh;
         }
 
+        protected const int SNAPSHOT_LOOKBEHIND_NOTES = 8;
+        protected const int SNAPSHOT_LOOKAHEAD_NOTES  = 64;
+
+        protected void CaptureGenericSnapshot(EngineSnapshot snapshot)
+        {
+            CaptureBaseSnapshot(snapshot);
+
+            // Note-flag slice
+            int start = Math.Max(0, NoteIndex - SNAPSHOT_LOOKBEHIND_NOTES);
+            int end   = Math.Min(Notes.Count, NoteIndex + SNAPSHOT_LOOKAHEAD_NOTES);
+            int count = end - start;
+            snapshot.NoteFlagStartIndex = start;
+            snapshot.NoteFlags = new byte[count];
+            for (int i = 0; i < count; i++)
+            {
+                var note = Notes[start + i];
+                var flags = EngineSnapshot.NoteFlag.None;
+                if (note.WasHit)
+                {
+                    flags |= EngineSnapshot.NoteFlag.WasHit;
+                }
+
+                if (note.WasMissed)
+                {
+                    flags |= EngineSnapshot.NoteFlag.WasMissed;
+                }
+
+                if (note.WasFullyHit())
+                {
+                    flags |= EngineSnapshot.NoteFlag.WasFullyHit;
+                }
+
+                snapshot.NoteFlags[i] = (byte) flags;
+            }
+
+            var sustains = new SustainSnapshot[ActiveSustains.Count];
+            for (int i = 0; i < ActiveSustains.Count; i++)
+            {
+                ref var s = ref ActiveSustains[i];
+                int idx = Notes.IndexOf(s.Note);
+                sustains[i] = new SustainSnapshot(
+                    idx, s.BaseTick, s.BaseScore,
+                    s.HasFinishedScoring, s.IsLeniencyHeld, s.LeniencyDropTime);
+            }
+            snapshot.ActiveSustains = sustains;
+
+            snapshot.WhammyTicksRemainder = WhammyTicksRemainder;
+            snapshot.Stats = CloneStats();
+        }
+
+        protected void RestoreGenericSnapshot(EngineSnapshot snapshot)
+        {
+            RestoreBaseSnapshot(snapshot);
+
+            for (int i = 0; i < snapshot.NoteFlags.Length; i++)
+            {
+                int chartIndex = snapshot.NoteFlagStartIndex + i;
+                if (chartIndex >= Notes.Count)
+                {
+                    break;
+                }
+
+                var note = Notes[chartIndex];
+                var flags = (EngineSnapshot.NoteFlag) snapshot.NoteFlags[i];
+
+                bool wasHit       = (flags & EngineSnapshot.NoteFlag.WasHit) != 0;
+                bool wasMissed    = (flags & EngineSnapshot.NoteFlag.WasMissed) != 0;
+                bool wasResolved  = note.WasHit || note.WasMissed;
+
+                note.SetHitState(wasHit, includeChildren: true);
+                note.SetMissState(wasMissed, includeChildren: true);
+
+                bool isResolved = wasHit || wasMissed;
+                if (wasResolved || !isResolved)
+                {
+                    continue;
+                }
+
+                if (wasHit)
+                {
+                    OnNoteHit?.Invoke(chartIndex, note);
+                }
+                else
+                {
+                    OnNoteMissed?.Invoke(chartIndex, note);
+                }
+            }
+
+            // Diff pre/post-restore sustains and fire OnSustainEnd for dropped ones
+            var preRestoreNotes = new List<TNoteType>(ActiveSustains.Count);
+            for (int i = 0; i < ActiveSustains.Count; i++)
+            {
+                preRestoreNotes.Add(ActiveSustains[i].Note);
+            }
+
+            ActiveSustains.Clear();
+            foreach (var s in snapshot.ActiveSustains)
+            {
+                if (s.NoteIndex < 0 || s.NoteIndex >= Notes.Count)
+                {
+                    continue;
+                }
+
+                var note = Notes[s.NoteIndex];
+                var sustain = new ActiveSustain<TNoteType>(note)
+                {
+                    BaseTick = s.BaseTick,
+                    BaseScore = s.BaseScore,
+                    HasFinishedScoring = s.HasFinishedScoring,
+                    IsLeniencyHeld = s.IsLeniencyHeld,
+                    LeniencyDropTime = s.LeniencyDropTime,
+                };
+                ActiveSustains.Add(sustain);
+            }
+
+            // "finished"=false because the sustain didn't score out (it was undone)
+            int droppedCount = 0;
+            foreach (var preNote in preRestoreNotes)
+            {
+                bool stillActive = false;
+                for (int i = 0; i < ActiveSustains.Count; i++)
+                {
+                    if (!ReferenceEquals(ActiveSustains[i].Note, preNote))
+                    {
+                        continue;
+                    }
+
+                    stillActive = true;
+                    break;
+                }
+
+                if (stillActive)
+                {
+                    continue;
+                }
+
+                droppedCount++;
+                OnSustainEnd?.Invoke(preNote, CurrentTime, false);
+            }
+            if (preRestoreNotes.Count > 0 || ActiveSustains.Count > 0)
+            {
+                YargLogger.LogFormatDebug(
+                    "Prediction[sim-restore] sustain diff: pre={0} post={1} dropped={2} (OnSustainEnd fired for dropped)",
+                    preRestoreNotes.Count, ActiveSustains.Count, droppedCount);
+            }
+
+            WhammyTicksRemainder = snapshot.WhammyTicksRemainder;
+
+            if (snapshot.Stats != null)
+            {
+                EngineStats.CopyFrom(snapshot.Stats);
+            }
+        }
+
+        /// <summary>Deep copy of <see cref="EngineStats"/> via the matching TEngineStats copy ctor.</summary>
+        protected abstract TEngineStats CloneStats();
+
+        /// <inheritdoc />
+        public override void ForceHit(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count)
+            {
+                return;
+            }
+
+            var note = Notes[noteIndex];
+            if (note.WasHit || note.WasMissed)
+            {
+                return;
+            }
+
+            HitNote(note);
+        }
+
+        /// <inheritdoc />
+        public override void ForceMiss(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count)
+            {
+                return;
+            }
+
+            var note = Notes[noteIndex];
+            if (note.WasHit || note.WasMissed)
+            {
+                return;
+            }
+
+            MissNote(note);
+        }
+
+        /// <inheritdoc />
+        public override void ForceReleaseSustain(int noteIndex)
+        {
+            if (noteIndex < 0 || noteIndex >= Notes.Count)
+            {
+                return;
+            }
+
+            var note = Notes[noteIndex];
+            for (int i = 0; i < ActiveSustains.Count; i++)
+            {
+                if (!ReferenceEquals(ActiveSustains[i].Note, note))
+                {
+                    continue;
+                }
+
+                EndSustain(i, dropped: true, isEndOfSustain: false);
+                return;
+            }
+        }
+
         protected override void GenerateQueuedUpdates(double nextTime)
         {
             base.GenerateQueuedUpdates(nextTime);
@@ -846,6 +1058,17 @@ namespace YARG.Core.Engine
             ActiveSustains.RemoveAt(sustainIndex);
 
             OnSustainEnd?.Invoke(sustain.Note, CurrentTime, sustain.HasFinishedScoring);
+
+            // Fires only for *early release* — natural-end stops are deterministic from the
+            // chart and don't need to be wired. Score/SP reconcile via the periodic snapshot.
+            if (dropped && !isEndOfSustain)
+            {
+                int chartIndex = Notes.IndexOf(sustain.Note);
+                if (chartIndex >= 0)
+                {
+                    OnSyncSustainReleased?.Invoke(chartIndex, CurrentTime);
+                }
+            }
         }
 
         protected override void UpdateStarPower()
