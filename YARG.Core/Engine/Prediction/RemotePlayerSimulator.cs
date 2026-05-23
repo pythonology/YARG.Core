@@ -308,9 +308,14 @@ namespace YARG.Core.Engine.Prediction
                 return;
             }
 
-            // Drop late whammy samples; the next snapshot reconciles SP exactly.
-            YargLogger.LogFormatDebug(
-                "Prediction[sim-recv] Whammy (LATE, dropped — next snapshot will reconcile): songTime={0:0.000} value={1:0.00} engineCurrent={2:0.000}",
+            // Late sample. Under any non-zero RTT, songTime always trails the mirror's
+            // CurrentTime (the engine has been ticking forward in real time while the
+            // packet was in flight), so this branch is taken on essentially every
+            // whammy packet.
+            LatestWhammyValue = value > 0.01f ? value : 0f;
+
+            YargLogger.LogFormatTrace(
+                "Prediction[sim-recv] Whammy (LATE): songTime={0:0.000} value={1:0.00} engineCurrent={2:0.000}",
                 songTime, value, _engine.CurrentTime);
         }
 
@@ -322,6 +327,10 @@ namespace YARG.Core.Engine.Prediction
         private double _vocalPitchLatestTime  = double.NegativeInfinity;
         private float  _vocalPitchLatestMidi  = 0f;
         private bool   _vocalPitchLatestSinging;
+
+        // Sender emits ONLY while singing. Once the user goes silent
+        // there's a single state-transition packet (isSinging=false) and then nothing.
+        private const double VocalPitchStaleSeconds = 0.2;
 
         public void OnVocalPitch(double songTime, float pitchMidi, bool isSinging, double currentSongTime)
         {
@@ -343,6 +352,12 @@ namespace YARG.Core.Engine.Prediction
             {
                 return (0f, false);
             }
+
+            if (currentSongTime - _vocalPitchLatestTime > VocalPitchStaleSeconds)
+            {
+                return (_vocalPitchLatestMidi, false);
+            }
+
             // Forward-prediction isn't useful for pitch (voices change unpredictably) — hold last.
             if (double.IsNegativeInfinity(_vocalPitchPrevTime) || currentSongTime >= _vocalPitchLatestTime)
             {
