@@ -91,12 +91,16 @@ namespace YARG.Core.Engine.Prediction
         public bool IsConfirmedHit(int noteIndex)  => _confirmedHits.Contains(noteIndex);
 
         /// <summary>Markov-1: walk backward from <paramref name="noteIndex"/> to the nearest
-        /// confirmed note and return its status. Optimistic (true) if no confirmed history.
-        /// Safe to call on confirmed notes — returns their own status.</summary>
+        /// confirmed note and return its status. Optimistic (true) if no confirmed history.</summary>
         public bool PredictHitAt(int noteIndex)
         {
             if (_confirmedHits.Contains(noteIndex))  return true;
             if (_confirmedMisses.Contains(noteIndex)) return false;
+
+            if (noteIndex >= 0 && noteIndex < _notes.Count && _notes[noteIndex].IsChord)
+            {
+                return true;
+            }
 
             for (int i = noteIndex - 1; i >= 0; i--)
             {

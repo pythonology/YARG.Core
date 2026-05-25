@@ -73,6 +73,9 @@ namespace YARG.Core.Engine
         public int    NoteFlagStartIndex;
         public byte[] NoteFlags = System.Array.Empty<byte>();
 
+        public int[] SoloNotesHit = System.Array.Empty<int>();
+        public int[] SoloBonus    = System.Array.Empty<int>();
+
         // Captured by chart-index to avoid pinning typed note references.
         public SustainSnapshot[] ActiveSustains = System.Array.Empty<SustainSnapshot>();
 

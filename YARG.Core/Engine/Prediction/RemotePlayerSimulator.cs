@@ -15,14 +15,10 @@ namespace YARG.Core.Engine.Prediction
     public sealed class RemotePlayerSimulator<TNoteType> : IRemotePlayerSimulator
         where TNoteType : Note<TNoteType>
     {
-        public const double DefaultRemoteTrackDelaySeconds = 0.0;
-
         private readonly BaseEngine                     _engine;
         private readonly IReadOnlyList<TNoteType>       _notes;
         private readonly NotePredictionScheduler<TNoteType> _scheduler;
         private readonly EngineRollbackBuffer           _rollback;
-        private readonly double                         _remoteTrackDelay;
-        private readonly double                         _commitWindow;
 
         // Reused across ticks to keep the hot path allocation-free.
         private readonly List<NotePredictionScheduler<TNoteType>.Decision> _pendingDecisions = new();
@@ -39,10 +35,22 @@ namespace YARG.Core.Engine.Prediction
 
         private double _authoritativeSnapshotSongTime = double.NegativeInfinity;
 
+        // Note hit/miss wire protocol cursor. The sender only emits a packet when the
+        // outcome FLIPS (hit→miss or miss→hit), so each arriving event implies that
+        // every note since the previous event was the *opposite* kind: a Hit(N)
+        // packet means notes [cursor, N-1] were misses and N itself was a hit; a
+        // Miss(N) packet means [cursor, N-1] were hits and N itself was a miss.
+        // This is Markov-1-consistent — the scheduler's prediction over those
+        // implicit ranges already matches the opposite kind, so the gap fills
+        // typically don't trigger rollback; only the transition note (N) does.
+        //
+        // Reset to 0 on Reset() and rewound to the engine's NoteIndex on snapshot
+        // restore so the next sender transition references the right window.
+        private int _nextExpectedNoteIndex;
+
         public RemotePlayerSimulator(
             BaseEngine engine,
             IReadOnlyList<TNoteType> notes,
-            double remoteTrackDelaySeconds = DefaultRemoteTrackDelaySeconds,
             double commitWindowSeconds     = NotePredictionScheduler<TNoteType>.DefaultCommitWindowSeconds,
             double modeChangeExtensionSeconds = NotePredictionScheduler<TNoteType>.DefaultModeChangeExtensionSeconds)
         {
@@ -50,38 +58,64 @@ namespace YARG.Core.Engine.Prediction
             _notes     = notes  ?? throw new ArgumentNullException(nameof(notes));
             _scheduler = new NotePredictionScheduler<TNoteType>(notes, commitWindowSeconds, modeChangeExtensionSeconds);
             _rollback  = new EngineRollbackBuffer();
-            _remoteTrackDelay = remoteTrackDelaySeconds;
-            _commitWindow     = commitWindowSeconds;
 
             // Mirror engines have no input pipeline; CanSustainHold / CheckForNoteHit must
             // bypass input-state checks. State is driven by Force* calls + wire snapshots.
             _engine.IsRemoteMirror = true;
 
             YargLogger.LogFormatInfo(
-                "Prediction[sim-ctor]: engine={0} notes={1} trackDelay={2:0.000}s commitWindow={3:0.000}s modeChangeExtra={4:0.000}s",
-                engine.GetType().Name, notes.Count,
-                remoteTrackDelaySeconds, commitWindowSeconds, modeChangeExtensionSeconds);
+                "Prediction[sim-ctor]: engine={0} notes={1} commitWindow={2:0.000}s modeChangeExtra={3:0.000}s",
+                engine.GetType().Name, notes.Count, commitWindowSeconds, modeChangeExtensionSeconds);
         }
 
         public BaseEngine Engine => _engine;
-        public double RemoteTrackDelaySeconds => _remoteTrackDelay;
 
         // Polled each frame by the per-instrument player (remote mirrors have no OnInputQueued).
         // Samples with axis <= 0.01 reset to 0 so releasing the bar zeros the visual.
         public float LatestWhammyValue { get; private set; }
-        public double VisualDelaySeconds => _remoteTrackDelay + _commitWindow;
 
         public double AuthoritativeSnapshotSongTime => _authoritativeSnapshotSongTime;
 
-        /// <summary>Engine runs at <c>(localSongTime - remoteTrackDelay)</c>. All pending queues
-        /// are drained in time order so the engine sees every event at its correct CurrentTime.</summary>
+        // Diagnostic state for the "engine stuck behind localSongTime" probe below.
+        private double _lastUpdateLogSongTime = double.NegativeInfinity;
+        private int    _consecutiveSkippedUpdates;
+
+        /// <summary>Mirror engine runs at local song time directly — no transport-delay budget,
+        /// no visual delay. Pending queues drain in time order so the engine sees every event
+        /// at its correct CurrentTime.</summary>
         public void Update(double localSongTime)
         {
-            double remoteEngineTime = localSongTime - _remoteTrackDelay;
+            // Track the local clock for the snapshot-apply skew probe below; capture
+            // even when we early-return so the probe has fresh data if the engine is
+            // already stalled by the time a snapshot arrives.
+            _latestKnownLocalSongTime = localSongTime;
+
+            double remoteEngineTime = localSongTime;
             if (remoteEngineTime <= _engine.CurrentTime)
             {
+                // Diagnostic probe: catch the "sync broke mid-song" case. The intended
+                // steady state is localSongTime ≈ _engine.CurrentTime (small frame-time
+                // gap). If a snapshot restored engine.CurrentTime ahead of localSongTime
+                // (clock skew, future-stamped wire snapshot), this early-out fires and
+                // the engine never advances until localSongTime catches up. A run of
+                // skips wider than ~1 s strongly suggests the engine is stuck ahead.
+                _consecutiveSkippedUpdates++;
+                if (_consecutiveSkippedUpdates % 60 == 0
+                    && _engine.CurrentTime - localSongTime > 0.5
+                    && localSongTime - _lastUpdateLogSongTime > 1.0)
+                {
+                    _lastUpdateLogSongTime = localSongTime;
+                    YargLogger.LogFormatWarning(
+                        "Prediction[sim-update] engine ahead of localSongTime by {0:0.000}s for {1} consecutive ticks " +
+                        "(engineCurrent={2:0.000} localSongTime={3:0.000}). Engine is stalled — wire events landing here " +
+                        "will fall into RegisterHit/Miss without advancing the engine clock, so PredictedHit/Miss never " +
+                        "commit and the highway looks frozen. Likely a snapshot restored CurrentTime ahead of local.",
+                        _engine.CurrentTime - localSongTime, _consecutiveSkippedUpdates,
+                        _engine.CurrentTime, localSongTime);
+                }
                 return;
             }
+            _consecutiveSkippedUpdates = 0;
 
             _pendingDecisions.Clear();
             _scheduler.DrainDueDecisions(remoteEngineTime, _pendingDecisions);
@@ -158,23 +192,8 @@ namespace YARG.Core.Engine.Prediction
 
         public bool OnNoteMissed(int noteIndex, double currentSongTime)
         {
-            double remoteEngineTime = currentSongTime - _remoteTrackDelay;
-            double noteTime = (noteIndex >= 0 && noteIndex < _notes.Count) ? _notes[noteIndex].Time : double.NaN;
-
-            bool rollbackNeeded = _scheduler.RegisterMiss(noteIndex, remoteEngineTime);
-            if (!rollbackNeeded)
-            {
-                YargLogger.LogFormatDebug(
-                    "Prediction[sim-recv] NoteMissed (matches prediction or in-window): noteIndex={0} noteTime={1:0.000} engineTime={2:0.000}",
-                    noteIndex, noteTime, remoteEngineTime);
-                return true;
-            }
-
-            YargLogger.LogFormatInfo(
-                "Prediction[sim-recv] NoteMissed (rollback — engine had it as hit): noteIndex={0} noteTime={1:0.000} engineTime={2:0.000} engineCurrent={3:0.000}",
-                noteIndex, noteTime, remoteEngineTime, _engine.CurrentTime);
-
-            return RollbackAndReplay(noteTime, "miss", injectedEvent: null);
+            // Miss(N): fill [cursor, N-1] as implicit hits, then commit N as miss.
+            return OnNoteOutcome(noteIndex, currentSongTime, explicitWasHit: false);
         }
 
         public void RecordWireHitOffset(int noteIndex, double wireHitTime)
@@ -189,23 +208,71 @@ namespace YARG.Core.Engine.Prediction
 
         public bool OnNoteHit(int noteIndex, double currentSongTime)
         {
-            double remoteEngineTime = currentSongTime - _remoteTrackDelay;
-            double noteTime = (noteIndex >= 0 && noteIndex < _notes.Count) ? _notes[noteIndex].Time : double.NaN;
+            // Hit(N): fill [cursor, N-1] as implicit misses, then commit N as hit.
+            return OnNoteOutcome(noteIndex, currentSongTime, explicitWasHit: true);
+        }
 
-            bool rollbackNeeded = _scheduler.RegisterHit(noteIndex, remoteEngineTime);
-            if (!rollbackNeeded)
+        // Shared body for OnNoteHit / OnNoteMissed under the run-length-encoded wire
+        // protocol. The sender only emits a packet when the outcome flips, so the
+        // implicit range [_nextExpectedNoteIndex, noteIndex - 1] is the OPPOSITE kind
+        // of the explicit one. We register each implicit note + the explicit one and
+        // do at most one rollback to the earliest mis-decided note's time — that
+        // single rollback's forward replay reconciles every later note via the
+        // scheduler's now-up-to-date confirmed sets.
+        private bool OnNoteOutcome(int noteIndex, double currentSongTime, bool explicitWasHit)
+        {
+            double remoteEngineTime = currentSongTime;
+            double explicitNoteTime = (noteIndex >= 0 && noteIndex < _notes.Count)
+                ? _notes[noteIndex].Time : double.NaN;
+
+            int earliestRollbackIndex = -1;
+
+            // Implicit fill — opposite kind. Clamped to non-negative in case a snapshot
+            // bumped the cursor past noteIndex (duplicate / out-of-order; ReliableOrdered
+            // shouldn't drop or reorder, but defensive against snapshot rewinds).
+            int fillStart = Math.Max(_nextExpectedNoteIndex, 0);
+            for (int i = fillStart; i < noteIndex; i++)
+            {
+                bool needsRollback = explicitWasHit
+                    ? _scheduler.RegisterMiss(i, remoteEngineTime)
+                    : _scheduler.RegisterHit(i, remoteEngineTime);
+                if (needsRollback && earliestRollbackIndex < 0)
+                {
+                    earliestRollbackIndex = i;
+                }
+            }
+
+            // Explicit transition note.
+            bool explicitNeedsRollback = explicitWasHit
+                ? _scheduler.RegisterHit(noteIndex, remoteEngineTime)
+                : _scheduler.RegisterMiss(noteIndex, remoteEngineTime);
+            if (explicitNeedsRollback && earliestRollbackIndex < 0)
+            {
+                earliestRollbackIndex = noteIndex;
+            }
+
+            // Advance the cursor past this transition. Don't rewind on duplicates.
+            if (noteIndex + 1 > _nextExpectedNoteIndex)
+            {
+                _nextExpectedNoteIndex = noteIndex + 1;
+            }
+
+            string kind = explicitWasHit ? "Hit" : "Miss";
+            if (earliestRollbackIndex < 0)
             {
                 YargLogger.LogFormatDebug(
-                    "Prediction[sim-recv] NoteHit (matches prediction or in-window): noteIndex={0} noteTime={1:0.000} engineTime={2:0.000}",
-                    noteIndex, noteTime, remoteEngineTime);
+                    "Prediction[sim-recv] Note{0} (matches prediction): noteIndex={1} fillRange=[{2},{3}] engineTime={4:0.000}",
+                    kind, noteIndex, fillStart, noteIndex - 1, remoteEngineTime);
                 return true;
             }
 
+            double rollbackTime = (earliestRollbackIndex >= 0 && earliestRollbackIndex < _notes.Count)
+                ? _notes[earliestRollbackIndex].Time : explicitNoteTime;
             YargLogger.LogFormatInfo(
-                "Prediction[sim-recv] NoteHit (rollback — engine had it as miss): noteIndex={0} noteTime={1:0.000} engineTime={2:0.000} engineCurrent={3:0.000}",
-                noteIndex, noteTime, remoteEngineTime, _engine.CurrentTime);
+                "Prediction[sim-recv] Note{0} (rollback at noteIndex={1}, earliest mis-decided={2}): rollbackTime={3:0.000} engineCurrent={4:0.000}",
+                kind, noteIndex, earliestRollbackIndex, rollbackTime, _engine.CurrentTime);
 
-            return RollbackAndReplay(noteTime, "hit", injectedEvent: null);
+            return RollbackAndReplay(rollbackTime, explicitWasHit ? "hit" : "miss", injectedEvent: null);
         }
 
         public bool OnSustainReleased(int sustainNoteIndex, double releaseSongTime, double currentSongTime)
@@ -328,14 +395,121 @@ namespace YARG.Core.Engine.Prediction
         private float  _vocalPitchLatestMidi  = 0f;
         private bool   _vocalPitchLatestSinging;
 
-        // Sender emits ONLY while singing. Once the user goes silent
-        // there's a single state-transition packet (isSinging=false) and then nothing.
+        // Sender emits ONLY while singing. Once the user goes silent the sender does
+        // a short grace-period hold, then emits a single singing→silent transition
+        // packet and stops. This staleness gate is the failsafe for when that single
+        // transition packet drops over UDP. 200 ms rides out ordinary network jitter
+        // and the ~50 ms inter-sample interval without false-tripping, while still
+        // hiding the needle reasonably quickly if the transition packet really is
+        // lost (the sender's own grace period guarantees we never see real flicker
+        // in the singing direction).
         private const double VocalPitchStaleSeconds = 0.2;
+
+        // Forward-extrapolation cap. We project past the latest sample along the
+        // prev→latest slope while waiting for the next packet, but pitch is one of
+        // the higher-frequency signals (vibrato, scoops, sharp drop-offs at phrase
+        // ends), so an aggressive forward project peaks/troughs in the wrong
+        // direction within a single sample interval. Cap at half a typical send
+        // interval, then dampen the projected slope below 1.0 so the prediction
+        // never overshoots a sample-interval's worth of motion in the wrong
+        // direction. The consumer's per-frame transform Mathf.Lerp does the rest.
+        private const double VocalPitchMaxExtrapolateSeconds = 0.025;
+
+        // Slope damping past _vocalPitchLatestTime. 1.0 = raw linear extrapolation
+        // (what we had — overshoots vibrato), 0.0 = hold latest (no prediction).
+        // 0.4 keeps a gentle predictive lean without flying off the chart range
+        // when the singer hits a vibrato peak right before a packet is delayed.
+        private const double VocalPitchExtrapolateSlopeDamping = 0.4;
+
+        // EWMA smoothing factor for the extrapolation-error correction below.
+        // Each new sample's residual (predicted - actual midi) folds into the
+        // average at this weight. 0.25 ≈ four-sample half-life at our ~20 Hz
+        // send rate (~200 ms of memory) — responsive enough to chase a singer
+        // who's drifting up a half-step on every phrase, slow enough that one
+        // noisy analyzer reading doesn't push the bias around.
+        private const float VocalPitchErrorEwmaAlpha = 0.25f;
+
+        // Cap how much the EWMA can shift the projection — guards against a
+        // long stretch of one-sided errors producing a runaway bias that
+        // pushes the needle off-chart. ±2 semitones is generous (well past
+        // any plausible analyzer drift) but still bounded.
+        private const float VocalPitchErrorEwmaMaxSemitones = 2.0f;
+
+        // Running average of (extrapolated_at_new_sample_time - actual_new_sample_midi).
+        // Positive means we systematically over-project; we subtract this from
+        // future extrapolation outputs so the bias self-cancels. Reset on
+        // singing-state transitions (new phrase = new singer dynamics) and on
+        // long-gap re-engagement (staleness gate clears _samplesSeenInPhrase).
+        private float _vocalPitchErrorEwma;
+
+        // Counts samples folded into the EWMA since the last reset. Used to
+        // gate the bias application during the first sample or two of a new
+        // phrase — applying a stale EWMA from the previous phrase would push
+        // the needle the wrong direction at the worst possible moment (note
+        // entry, where hit detection cares most about pitch accuracy).
+        private int _vocalPitchErrorSamplesSeen;
 
         public void OnVocalPitch(double songTime, float pitchMidi, bool isSinging, double currentSongTime)
         {
             // Late samples are dropped — lerp anchor times must be monotonically non-decreasing.
             if (songTime < _vocalPitchLatestTime) return;
+
+            // Fold the extrapolation residual into the EWMA. Only meaningful when the
+            // new sample sits in the same singing phrase as the prev→latest pair we'd
+            // have extrapolated from: a phrase boundary (singing flag flip) is a fresh
+            // dynamic regime where the prior phrase's bias doesn't transfer. Skip on
+            // degenerate windows (dt <= 0) and on the first two samples of a phrase
+            // (no prev→latest pair to project from yet).
+            // A long gap since the latest sample (sender paused without sending the
+            // singing→silent transition — UDP packet drop or sender app stutter) is
+            // effectively a phrase boundary too. Extrapolating across that gap to
+            // compute a residual would feed garbage into the EWMA. Mirror the
+            // staleness threshold used by the consumer.
+            bool longGap = !double.IsNegativeInfinity(_vocalPitchLatestTime)
+                && (songTime - _vocalPitchLatestTime) > VocalPitchStaleSeconds;
+
+            if (isSinging
+                && !longGap
+                && _vocalPitchPrevSinging && _vocalPitchLatestSinging
+                && !double.IsNegativeInfinity(_vocalPitchPrevTime)
+                && songTime > _vocalPitchLatestTime)
+            {
+                double dt = _vocalPitchLatestTime - _vocalPitchPrevTime;
+                if (dt > 0)
+                {
+                    // What the prev→latest extrapolation (the one a reader at songTime
+                    // would have got from GetInterpolatedPitch *before* this packet
+                    // arrived) would have produced for the new sample's instant.
+                    double slopePerSec = (_vocalPitchLatestMidi - _vocalPitchPrevMidi) / dt;
+                    double ahead = songTime - _vocalPitchLatestTime;
+                    if (ahead > VocalPitchMaxExtrapolateSeconds)
+                    {
+                        ahead = VocalPitchMaxExtrapolateSeconds;
+                    }
+                    double projectedAtNew = _vocalPitchLatestMidi
+                        + slopePerSec * ahead * VocalPitchExtrapolateSlopeDamping;
+
+                    // Residual (positive => we over-projected, future extrapolations
+                    // should be biased *down* by this amount; subtraction at the
+                    // application site achieves that).
+                    float residual = (float)(projectedAtNew - pitchMidi);
+                    _vocalPitchErrorEwma =
+                        _vocalPitchErrorEwma * (1f - VocalPitchErrorEwmaAlpha)
+                        + residual * VocalPitchErrorEwmaAlpha;
+                    if (_vocalPitchErrorEwma > VocalPitchErrorEwmaMaxSemitones)
+                        _vocalPitchErrorEwma = VocalPitchErrorEwmaMaxSemitones;
+                    else if (_vocalPitchErrorEwma < -VocalPitchErrorEwmaMaxSemitones)
+                        _vocalPitchErrorEwma = -VocalPitchErrorEwmaMaxSemitones;
+                    _vocalPitchErrorSamplesSeen++;
+                }
+            }
+            else if (_vocalPitchLatestSinging != isSinging || longGap)
+            {
+                // Phrase boundary (singing flag flipped) or long-gap re-entry —
+                // drop the bias so the next phrase starts unbiased.
+                _vocalPitchErrorEwma = 0f;
+                _vocalPitchErrorSamplesSeen = 0;
+            }
 
             _vocalPitchPrevTime    = _vocalPitchLatestTime;
             _vocalPitchPrevMidi    = _vocalPitchLatestMidi;
@@ -348,31 +522,120 @@ namespace YARG.Core.Engine.Prediction
 
         public (float pitchMidi, bool isSinging) GetInterpolatedPitch(double currentSongTime)
         {
+            // No samples yet — render at zero, hidden.
             if (double.IsNegativeInfinity(_vocalPitchLatestTime))
             {
                 return (0f, false);
             }
 
+            // Staleness gate. Sender stopped (or the transition-to-silent packet was
+            // dropped) more than VocalPitchStaleSeconds ago. Force isSinging=false; the
+            // consumer hides the needle but keeps the last position so the next show
+            // snaps back at the prior pitch instead of teleporting to zero.
+            //
+            // When the most-recent sample is the singing→silent transition packet, its
+            // pitch value isn't a reliable continuation of the singer's contour — the
+            // analyzer was already chasing near-zero / noise-floor input by the time
+            // the sender flipped the flag. Pin the held position to the *previous*
+            // (still-singing) anchor's pitch so the needle parks at where the singer
+            // actually was when they stopped, not at the analyzer's tail noise.
             if (currentSongTime - _vocalPitchLatestTime > VocalPitchStaleSeconds)
             {
+                if (!_vocalPitchLatestSinging && _vocalPitchPrevSinging
+                    && !double.IsNegativeInfinity(_vocalPitchPrevTime))
+                {
+                    return (_vocalPitchPrevMidi, false);
+                }
                 return (_vocalPitchLatestMidi, false);
             }
 
-            // Forward-prediction isn't useful for pitch (voices change unpredictably) — hold last.
-            if (double.IsNegativeInfinity(_vocalPitchPrevTime) || currentSongTime >= _vocalPitchLatestTime)
+            // Only one sample so far — nothing to derive a velocity from. Hold latest.
+            // (Pre-staleness, so isSinging follows the sample.)
+            if (double.IsNegativeInfinity(_vocalPitchPrevTime))
             {
                 return (_vocalPitchLatestMidi, _vocalPitchLatestSinging);
             }
+
+            // Degenerate window (duplicate timestamps). Avoid the divide-by-zero by
+            // falling back to the latest value; next non-duplicate sample re-arms the
+            // pair.
+            double dt = _vocalPitchLatestTime - _vocalPitchPrevTime;
+            if (dt <= 0)
+            {
+                return (_vocalPitchLatestMidi, _vocalPitchLatestSinging);
+            }
+
+            // Read time before prev — should be rare (out-of-order delivery is dropped
+            // earlier in OnVocalPitch) but defensible. Clamp to prev so the value stays
+            // bounded by actually-observed samples.
             if (currentSongTime <= _vocalPitchPrevTime)
             {
                 return (_vocalPitchPrevMidi, _vocalPitchPrevSinging);
             }
 
-            // IsSinging follows the latest sample (boolean doesn't lerp); transition snaps at latest time.
-            double t = (currentSongTime - _vocalPitchPrevTime)
-                       / (_vocalPitchLatestTime - _vocalPitchPrevTime);
-            float pitch = (float)(_vocalPitchPrevMidi + (_vocalPitchLatestMidi - _vocalPitchPrevMidi) * t);
-            return (pitch, _vocalPitchLatestSinging);
+            // Singing-state transition between the two anchors. Lerping a pitch
+            // across the boundary visibly shoots the needle to the top or bottom
+            // of the chart at phrase ends: the silent-side sample's pitch value
+            // isn't a real continuation of the singer's contour (it's whatever
+            // the analyzer last reported when input went quiet — often noise
+            // floor or a near-zero MIDI value), and dragging the needle there
+            // looks like a sharp jump. Snap to the new flag and pin the needle
+            // at the actively-singing side's pitch so the next show resumes
+            // from a sensible position.
+            if (_vocalPitchPrevSinging != _vocalPitchLatestSinging)
+            {
+                return _vocalPitchLatestSinging
+                    ? (_vocalPitchLatestMidi, true)
+                    : (_vocalPitchPrevMidi, false);
+            }
+
+            // Combined interpolation + damped prediction.
+            //   read ∈ [prevTime, latestTime] → linear interpolation between the two
+            //                                   buffered samples (full strength: the
+            //                                   read sits between known anchors).
+            //   read > latestTime             → forward extrapolation along the
+            //                                   prev→latest velocity, with the slope
+            //                                   damped (VocalPitchExtrapolateSlopeDamping)
+            //                                   and the time cap (VocalPitchMaxExtrapolateSeconds)
+            //                                   both applied. Damping keeps the projection
+            //                                   from overshooting vibrato peaks; the time
+            //                                   cap keeps it from running away if a packet
+            //                                   is delayed.
+            // isSinging snaps to the latest sample (booleans don't lerp).
+            if (currentSongTime <= _vocalPitchLatestTime)
+            {
+                // Interpolation window — full-strength linear lerp.
+                double tLerp = (currentSongTime - _vocalPitchPrevTime) / dt;
+                float lerpPitch = (float)(_vocalPitchPrevMidi
+                    + (_vocalPitchLatestMidi - _vocalPitchPrevMidi) * tLerp);
+                return (lerpPitch, _vocalPitchLatestSinging);
+            }
+
+            // Extrapolation: cap the elapsed time past latest, then project with the
+            // damped slope. slopePerSec is computed against the actual prev→latest
+            // interval (full strength); the damping is applied only to the projected
+            // motion past latestTime, so smoothness inside the window is unaffected.
+            //
+            // The EWMA bias is then subtracted from the projection so a persistent
+            // over- or under-shoot (analyzer latency, singer drifting flat/sharp,
+            // damping factor mismatched to the singer's vibrato style) cancels out
+            // over a few sample intervals. Skip for the first sample or two of a new
+            // phrase — the EWMA was reset, and applying ~0 has no effect anyway,
+            // but the gate makes the intent explicit: vocal hit detection at note
+            // entry can't tolerate a stale bias from the prior phrase.
+            double aheadSeconds = currentSongTime - _vocalPitchLatestTime;
+            if (aheadSeconds > VocalPitchMaxExtrapolateSeconds)
+            {
+                aheadSeconds = VocalPitchMaxExtrapolateSeconds;
+            }
+            double slopePerSec = (_vocalPitchLatestMidi - _vocalPitchPrevMidi) / dt;
+            float predicted = (float)(_vocalPitchLatestMidi
+                + slopePerSec * aheadSeconds * VocalPitchExtrapolateSlopeDamping);
+            if (_vocalPitchErrorSamplesSeen >= 2)
+            {
+                predicted -= _vocalPitchErrorEwma;
+            }
+            return (predicted, _vocalPitchLatestSinging);
         }
 
         /// <summary>The single drift-reconciliation mechanism. Restores the engine to the
@@ -402,6 +665,12 @@ namespace YARG.Core.Engine.Prediction
 
             _scheduler.Rewind(_engine.NoteIndex);
 
+            // The snapshot's authoritative state covers every note up to engine.NoteIndex,
+            // so the next sender Hit/Miss transition will reference notes at or beyond
+            // that index. Anchor the run-length cursor there so we don't gap-fill into
+            // pre-snapshot territory the snapshot already settled.
+            _nextExpectedNoteIndex = _engine.NoteIndex;
+
             foreach (var ev in postEvents)
             {
                 ApplyReplayEvent(ev);
@@ -428,7 +697,38 @@ namespace YARG.Core.Engine.Prediction
                 "Prediction[sim-snapshot] applied: snapTime={0:0.000} engineWas={1:0.000} engineNow={2:0.000} scoreWas={3} scoreNow={4} replayedEvents={5} reEmittedDecisions={6}",
                 snapshotSongTime, engineBefore, _engine.CurrentTime,
                 scoreBefore, _engine.BaseStats.TotalScore, postEvents.Count, replayedDecisions);
+
+            // Future-stamped snapshot probe: if the snapshot's CurrentTime is ahead of
+            // the receiver's most recent localSongTime, sim.Update will short-circuit
+            // on subsequent ticks (its `remoteEngineTime <= _engine.CurrentTime` gate)
+            // and the engine sits frozen until local time catches up. Under normal
+            // network latency this never happens (the snapshot was created at the
+            // sender's clock and takes RTT to arrive, so it's always in the past);
+            // when it DOES happen the engine appears stuck for the rest of the song.
+            // The most likely cause is clock skew or a wall-clock-sync miscalibration
+            // that drifted the receiver's localSongTime behind the sender's. Log so we
+            // can see the exact moment the stall begins.
+            if (_engine.CurrentTime > _latestKnownLocalSongTime
+                && !double.IsNegativeInfinity(_latestKnownLocalSongTime))
+            {
+                YargLogger.LogFormatWarning(
+                    "Prediction[sim-snapshot] WIRE SNAPSHOT IS FUTURE-STAMPED relative to local clock: " +
+                    "snapTime={0:0.000} engineNow={1:0.000} latestLocalSongTime={2:0.000} skew={3:0.000}s. " +
+                    "Subsequent sim.Update calls will short-circuit until localSongTime catches up — if this " +
+                    "doesn't recover within a few seconds, the receiver's clock drifted behind the sender.",
+                    snapshotSongTime, _engine.CurrentTime, _latestKnownLocalSongTime,
+                    _engine.CurrentTime - _latestKnownLocalSongTime);
+            }
+
+            // Reset the stall-detection probe — a snapshot just resynced the engine, so
+            // any prior "engine ahead of localSongTime" streak is no longer meaningful.
+            _consecutiveSkippedUpdates = 0;
+            _lastUpdateLogSongTime = double.NegativeInfinity;
         }
+
+        // Captured from the most recent sim.Update / wire event so OnEngineStateSnapshot
+        // can compare the snapshot's time against the local clock.
+        private double _latestKnownLocalSongTime = double.NegativeInfinity;
 
         public void Reset()
         {
@@ -441,6 +741,18 @@ namespace YARG.Core.Engine.Prediction
             _confirmedReleased.Clear();
             _confirmedSpActivations.Clear();
             _authoritativeSnapshotSongTime = double.NegativeInfinity;
+            _nextExpectedNoteIndex = 0;
+            _consecutiveSkippedUpdates = 0;
+            _lastUpdateLogSongTime = double.NegativeInfinity;
+            _latestKnownLocalSongTime = double.NegativeInfinity;
+            _vocalPitchPrevTime    = double.NegativeInfinity;
+            _vocalPitchLatestTime  = double.NegativeInfinity;
+            _vocalPitchPrevMidi    = 0f;
+            _vocalPitchLatestMidi  = 0f;
+            _vocalPitchPrevSinging = false;
+            _vocalPitchLatestSinging = false;
+            _vocalPitchErrorEwma   = 0f;
+            _vocalPitchErrorSamplesSeen = 0;
         }
 
         // Snapshot at engine's current time, but skip if it would violate the buffer's

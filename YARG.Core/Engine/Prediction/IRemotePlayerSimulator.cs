@@ -6,19 +6,8 @@ namespace YARG.Core.Engine.Prediction
     {
         BaseEngine Engine { get; }
 
-        /// <summary>How far the mirror engine runs behind local song time, in seconds —
-        /// pure transport-delay budget for the network-event prediction window.</summary>
-        double RemoteTrackDelaySeconds { get; }
-
-        /// <summary>Total visual delay for the remote highway. Equals
-        /// <see cref="RemoteTrackDelaySeconds"/> plus the scheduler's commit window — the
-        /// engine doesn't resolve a note until the commit deadline elapses, so the visual
-        /// strikeline crossing must wait the full combined interval to fire at the same
-        /// instant as the engine's hit/miss event.</summary>
-        double VisualDelaySeconds { get; }
-
-        /// <summary>Drive the simulator forward to <paramref name="localSongTime"/>. Mirror
-        /// engine internally runs at <c>(localSongTime - track delay)</c>.</summary>
+        /// <summary>Drive the simulator forward to <paramref name="localSongTime"/>. The
+        /// mirror engine ticks at local song time directly — no transport-delay budget.</summary>
         void Update(double localSongTime);
 
         /// <summary>Returns true if no rollback was needed, false if rollback fired or the
@@ -51,10 +40,8 @@ namespace YARG.Core.Engine.Prediction
         /// isSinging disambiguates a valid 0 MIDI value from "no input".</summary>
         void OnVocalPitch(double songTime, float pitchMidi, bool isSinging, double currentSongTime);
 
-        /// <summary>Linear interp between the two buffered samples. Returns the latest sample
-        /// as-is when only one sample exists or currentSongTime is past it. When the singer
-        /// isn't active, isSinging=false and callers should ignore the pitch (visual layer
-        /// usually hides the blob).</summary>
+        /// <summary>Linear interpolation when the read time falls between the two buffered
+        /// samples, or forward extrapolation along the prev->latest velocity when it doesn't.</summary>
         (float pitchMidi, bool isSinging) GetInterpolatedPitch(double currentSongTime);
 
         bool OnSustainReleased(int sustainNoteIndex, double releaseSongTime, double currentSongTime);

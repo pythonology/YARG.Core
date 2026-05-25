@@ -40,6 +40,8 @@ namespace YARG.Core.Engine
 
         protected SustainList<TNoteType> ActiveSustains = new(10);
 
+        public override int ActiveSustainCount => ActiveSustains.Count;
+
         protected double WhammyTicksRemainder = 0.0;
 
         protected readonly double TicksPerSustainPoint;
@@ -268,11 +270,24 @@ namespace YARG.Core.Engine
                 droppedCount++;
                 OnSustainEnd?.Invoke(preNote, CurrentTime, false);
             }
+            int addedCount = 0;
+            for (int i = 0; i < ActiveSustains.Count; i++)
+            {
+                var postNote = ActiveSustains[i].Note;
+                bool wasPreActive = preRestoreNotes.Any(t => ReferenceEquals(t, postNote));
+                if (wasPreActive)
+                {
+                    continue;
+                }
+
+                addedCount++;
+                OnSustainStart?.Invoke(postNote);
+            }
             if (preRestoreNotes.Count > 0 || ActiveSustains.Count > 0)
             {
                 YargLogger.LogFormatDebug(
-                    "Prediction[sim-restore] sustain diff: pre={0} post={1} dropped={2} (OnSustainEnd fired for dropped)",
-                    preRestoreNotes.Count, ActiveSustains.Count, droppedCount);
+                    "Prediction[sim-restore] sustain diff: pre={0} post={1} dropped={2} added={3}",
+                    preRestoreNotes.Count, ActiveSustains.Count, droppedCount, addedCount);
             }
 
             WhammyTicksRemainder = snapshot.WhammyTicksRemainder;

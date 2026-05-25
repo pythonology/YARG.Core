@@ -55,8 +55,9 @@ namespace YARG.Core.Engine
         public bool CanStarPowerActivate => BaseStats.StarPowerTickAmount >= TicksPerHalfSpBar;
         public int BaseScore { get; protected set; }
         public int BaseNoteScore { get; protected set; }
-        public abstract BaseEngineParameters BaseParameters { get; }
-        public abstract BaseStats            BaseStats      { get; }
+        public abstract BaseEngineParameters BaseParameters    { get; }
+        public abstract BaseStats            BaseStats         { get; }
+        public abstract int                  ActiveSustainCount { get; }
 
         protected bool StarPowerIsAllowed = true;
 
@@ -521,6 +522,22 @@ namespace YARG.Core.Engine
             snapshot.NextTrillNote              = NextTrillNote;
             snapshot.LaneExpireTime             = LaneExpireTime;
 
+            if (Solos.Count == 0)
+            {
+                snapshot.SoloNotesHit = System.Array.Empty<int>();
+                snapshot.SoloBonus    = System.Array.Empty<int>();
+            }
+            else
+            {
+                snapshot.SoloNotesHit = new int[Solos.Count];
+                snapshot.SoloBonus    = new int[Solos.Count];
+                for (int i = 0; i < Solos.Count; i++)
+                {
+                    snapshot.SoloNotesHit[i] = Solos[i].NotesHit;
+                    snapshot.SoloBonus[i]    = Solos[i].SoloBonus;
+                }
+            }
+
             snapshot.PendingInputs = InputQueue.Count == 0
                 ? System.Array.Empty<GameInput>()
                 : InputQueue.ToArray();
@@ -586,6 +603,17 @@ namespace YARG.Core.Engine
             RequiredLaneNote           = snapshot.RequiredLaneNote;
             NextTrillNote              = snapshot.NextTrillNote;
             LaneExpireTime             = snapshot.LaneExpireTime;
+
+            if (snapshot.SoloNotesHit != null && snapshot.SoloBonus != null)
+            {
+                int soloCount = System.Math.Min(snapshot.SoloNotesHit.Length, Solos.Count);
+                soloCount = System.Math.Min(soloCount, snapshot.SoloBonus.Length);
+                for (int i = 0; i < soloCount; i++)
+                {
+                    Solos[i].NotesHit  = snapshot.SoloNotesHit[i];
+                    Solos[i].SoloBonus = snapshot.SoloBonus[i];
+                }
+            }
 
             InputQueue.Clear();
             foreach (var input in snapshot.PendingInputs)
