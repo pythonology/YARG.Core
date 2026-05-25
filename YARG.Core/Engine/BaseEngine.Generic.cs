@@ -183,7 +183,35 @@ namespace YARG.Core.Engine
 
         protected void RestoreGenericSnapshot(EngineSnapshot snapshot)
         {
+            bool preSoloActive = IsSoloActive;
+            int  preSoloIndex  = CurrentSoloIndex;
+
             RestoreBaseSnapshot(snapshot);
+
+            bool nowSoloActive = IsSoloActive;
+            int  nowSoloIndex  = CurrentSoloIndex;
+            if (preSoloActive && !nowSoloActive)
+            {
+                if (preSoloIndex < Solos.Count)
+                    OnSoloEnd?.Invoke(Solos[preSoloIndex]);
+            }
+            else if (preSoloActive && nowSoloActive && nowSoloIndex > preSoloIndex)
+            {
+                if (preSoloIndex < Solos.Count) OnSoloEnd?.Invoke(Solos[preSoloIndex]);
+                if (nowSoloIndex < Solos.Count) OnSoloStart?.Invoke(Solos[nowSoloIndex]);
+            }
+            else if (!preSoloActive && nowSoloActive)
+            {
+                if (nowSoloIndex < Solos.Count) OnSoloStart?.Invoke(Solos[nowSoloIndex]);
+            }
+            else if (!preSoloActive && !nowSoloActive && nowSoloIndex > preSoloIndex)
+            {
+                for (int i = preSoloIndex; i < nowSoloIndex && i < Solos.Count; i++)
+                {
+                    OnSoloStart?.Invoke(Solos[i]);
+                    OnSoloEnd?.Invoke(Solos[i]);
+                }
+            }
 
             for (int i = 0; i < snapshot.NoteFlags.Length; i++)
             {
