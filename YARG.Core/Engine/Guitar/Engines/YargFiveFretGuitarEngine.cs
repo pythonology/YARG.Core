@@ -83,7 +83,12 @@ namespace YARG.Core.Engine.Guitar.Engines
             else if (action is GuitarAction.Whammy)
             {
                 StartWhammyTimer(gameInput.Time);
-                OnSyncWhammyAxis?.Invoke(gameInput.Time, gameInput.Axis);
+
+                // Only fire the sync event when there's actually a sustain being whammied.
+                if (ActiveSustains.Count > 0)
+                {
+                    OnSyncWhammyAxis?.Invoke(gameInput.Time, gameInput.Axis);
+                }
             }
             else if (action is GuitarAction.StrumDown or GuitarAction.StrumUp && gameInput.Button)
             {
