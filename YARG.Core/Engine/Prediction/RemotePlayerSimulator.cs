@@ -421,95 +421,10 @@ namespace YARG.Core.Engine.Prediction
         // when the singer hits a vibrato peak right before a packet is delayed.
         private const double VocalPitchExtrapolateSlopeDamping = 0.4;
 
-        // EWMA smoothing factor for the extrapolation-error correction below.
-        // Each new sample's residual (predicted - actual midi) folds into the
-        // average at this weight. 0.25 ≈ four-sample half-life at our ~20 Hz
-        // send rate (~200 ms of memory) — responsive enough to chase a singer
-        // who's drifting up a half-step on every phrase, slow enough that one
-        // noisy analyzer reading doesn't push the bias around.
-        private const float VocalPitchErrorEwmaAlpha = 0.25f;
-
-        // Cap how much the EWMA can shift the projection — guards against a
-        // long stretch of one-sided errors producing a runaway bias that
-        // pushes the needle off-chart. ±2 semitones is generous (well past
-        // any plausible analyzer drift) but still bounded.
-        private const float VocalPitchErrorEwmaMaxSemitones = 2.0f;
-
-        // Running average of (extrapolated_at_new_sample_time - actual_new_sample_midi).
-        // Positive means we systematically over-project; we subtract this from
-        // future extrapolation outputs so the bias self-cancels. Reset on
-        // singing-state transitions (new phrase = new singer dynamics) and on
-        // long-gap re-engagement (staleness gate clears _samplesSeenInPhrase).
-        private float _vocalPitchErrorEwma;
-
-        // Counts samples folded into the EWMA since the last reset. Used to
-        // gate the bias application during the first sample or two of a new
-        // phrase — applying a stale EWMA from the previous phrase would push
-        // the needle the wrong direction at the worst possible moment (note
-        // entry, where hit detection cares most about pitch accuracy).
-        private int _vocalPitchErrorSamplesSeen;
-
         public void OnVocalPitch(double songTime, float pitchMidi, bool isSinging, double currentSongTime)
         {
             // Late samples are dropped — lerp anchor times must be monotonically non-decreasing.
             if (songTime < _vocalPitchLatestTime) return;
-
-            // Fold the extrapolation residual into the EWMA. Only meaningful when the
-            // new sample sits in the same singing phrase as the prev→latest pair we'd
-            // have extrapolated from: a phrase boundary (singing flag flip) is a fresh
-            // dynamic regime where the prior phrase's bias doesn't transfer. Skip on
-            // degenerate windows (dt <= 0) and on the first two samples of a phrase
-            // (no prev→latest pair to project from yet).
-            // A long gap since the latest sample (sender paused without sending the
-            // singing→silent transition — UDP packet drop or sender app stutter) is
-            // effectively a phrase boundary too. Extrapolating across that gap to
-            // compute a residual would feed garbage into the EWMA. Mirror the
-            // staleness threshold used by the consumer.
-            bool longGap = !double.IsNegativeInfinity(_vocalPitchLatestTime)
-                && (songTime - _vocalPitchLatestTime) > VocalPitchStaleSeconds;
-
-            if (isSinging
-                && !longGap
-                && _vocalPitchPrevSinging && _vocalPitchLatestSinging
-                && !double.IsNegativeInfinity(_vocalPitchPrevTime)
-                && songTime > _vocalPitchLatestTime)
-            {
-                double dt = _vocalPitchLatestTime - _vocalPitchPrevTime;
-                if (dt > 0)
-                {
-                    // What the prev→latest extrapolation (the one a reader at songTime
-                    // would have got from GetInterpolatedPitch *before* this packet
-                    // arrived) would have produced for the new sample's instant.
-                    double slopePerSec = (_vocalPitchLatestMidi - _vocalPitchPrevMidi) / dt;
-                    double ahead = songTime - _vocalPitchLatestTime;
-                    if (ahead > VocalPitchMaxExtrapolateSeconds)
-                    {
-                        ahead = VocalPitchMaxExtrapolateSeconds;
-                    }
-                    double projectedAtNew = _vocalPitchLatestMidi
-                        + slopePerSec * ahead * VocalPitchExtrapolateSlopeDamping;
-
-                    // Residual (positive => we over-projected, future extrapolations
-                    // should be biased *down* by this amount; subtraction at the
-                    // application site achieves that).
-                    float residual = (float)(projectedAtNew - pitchMidi);
-                    _vocalPitchErrorEwma =
-                        _vocalPitchErrorEwma * (1f - VocalPitchErrorEwmaAlpha)
-                        + residual * VocalPitchErrorEwmaAlpha;
-                    if (_vocalPitchErrorEwma > VocalPitchErrorEwmaMaxSemitones)
-                        _vocalPitchErrorEwma = VocalPitchErrorEwmaMaxSemitones;
-                    else if (_vocalPitchErrorEwma < -VocalPitchErrorEwmaMaxSemitones)
-                        _vocalPitchErrorEwma = -VocalPitchErrorEwmaMaxSemitones;
-                    _vocalPitchErrorSamplesSeen++;
-                }
-            }
-            else if (_vocalPitchLatestSinging != isSinging || longGap)
-            {
-                // Phrase boundary (singing flag flipped) or long-gap re-entry —
-                // drop the bias so the next phrase starts unbiased.
-                _vocalPitchErrorEwma = 0f;
-                _vocalPitchErrorSamplesSeen = 0;
-            }
 
             _vocalPitchPrevTime    = _vocalPitchLatestTime;
             _vocalPitchPrevMidi    = _vocalPitchLatestMidi;
@@ -615,14 +530,6 @@ namespace YARG.Core.Engine.Prediction
             // damped slope. slopePerSec is computed against the actual prev→latest
             // interval (full strength); the damping is applied only to the projected
             // motion past latestTime, so smoothness inside the window is unaffected.
-            //
-            // The EWMA bias is then subtracted from the projection so a persistent
-            // over- or under-shoot (analyzer latency, singer drifting flat/sharp,
-            // damping factor mismatched to the singer's vibrato style) cancels out
-            // over a few sample intervals. Skip for the first sample or two of a new
-            // phrase — the EWMA was reset, and applying ~0 has no effect anyway,
-            // but the gate makes the intent explicit: vocal hit detection at note
-            // entry can't tolerate a stale bias from the prior phrase.
             double aheadSeconds = currentSongTime - _vocalPitchLatestTime;
             if (aheadSeconds > VocalPitchMaxExtrapolateSeconds)
             {
@@ -631,10 +538,6 @@ namespace YARG.Core.Engine.Prediction
             double slopePerSec = (_vocalPitchLatestMidi - _vocalPitchPrevMidi) / dt;
             float predicted = (float)(_vocalPitchLatestMidi
                 + slopePerSec * aheadSeconds * VocalPitchExtrapolateSlopeDamping);
-            if (_vocalPitchErrorSamplesSeen >= 2)
-            {
-                predicted -= _vocalPitchErrorEwma;
-            }
             return (predicted, _vocalPitchLatestSinging);
         }
 
@@ -751,8 +654,6 @@ namespace YARG.Core.Engine.Prediction
             _vocalPitchLatestMidi  = 0f;
             _vocalPitchPrevSinging = false;
             _vocalPitchLatestSinging = false;
-            _vocalPitchErrorEwma   = 0f;
-            _vocalPitchErrorSamplesSeen = 0;
         }
 
         // Snapshot at engine's current time, but skip if it would violate the buffer's
