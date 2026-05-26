@@ -1686,5 +1686,23 @@ namespace YARG.Core.Engine
 
             return codaSections;
         }
+
+        protected static bool MaskIsMultiFret(int mask)
+        {
+            return (mask & (mask - 1)) != 0;
+        }
+
+        protected static int GetMostSignificantBit(int mask)
+        {
+            // Gets the most significant bit of the mask
+            var msbIndex = 0;
+            while (mask != 0)
+            {
+                mask >>= 1;
+                msbIndex++;
+            }
+
+            return msbIndex;
+        }
     }
 }
