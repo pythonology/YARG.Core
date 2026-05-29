@@ -224,24 +224,33 @@ namespace YARG.Core.Engine
                 var note = Notes[chartIndex];
                 var flags = (EngineSnapshot.NoteFlag) snapshot.NoteFlags[i];
 
-                bool wasHit       = (flags & EngineSnapshot.NoteFlag.WasHit) != 0;
-                bool wasMissed    = (flags & EngineSnapshot.NoteFlag.WasMissed) != 0;
-                bool wasResolved  = note.WasHit || note.WasMissed;
+                // Target resolution from the snapshot.
+                bool wasHit    = (flags & EngineSnapshot.NoteFlag.WasHit) != 0;
+                bool wasMissed = (flags & EngineSnapshot.NoteFlag.WasMissed) != 0;
+
+                // Resolution before the restore, captured before we overwrite it.
+                bool prevHit    = note.WasHit;
+                bool prevMissed = note.WasMissed;
 
                 note.SetHitState(wasHit, includeChildren: true);
                 note.SetMissState(wasMissed, includeChildren: true);
 
-                bool isResolved = wasHit || wasMissed;
-                if (wasResolved || !isResolved)
-                {
-                    continue;
-                }
-
-                if (wasHit)
+                // Fire on any transition INTO a resolved kind: first resolution
+                // (unresolved -> hit/miss) as before, and now also outcome flips
+                // (hit -> miss / miss -> hit) that a late wire snapshot reconciles
+                // after we locally predicted the opposite. Without this, a snapshot
+                // correcting a predicted hit to a miss silently resets the combo
+                // (EngineStats.CopyFrom below) while leaving event-driven visuals --
+                // notably the FC ring -- stuck on the stale outcome.
+                //
+                // A resolved -> unresolved rewind fires nothing here; the forward
+                // replay that follows the restore re-decides the note and emits the
+                // real event at its correct time.
+                if (wasHit && !prevHit)
                 {
                     OnNoteHit?.Invoke(chartIndex, note);
                 }
-                else
+                else if (wasMissed && !prevMissed)
                 {
                     OnNoteMissed?.Invoke(chartIndex, note);
                 }
