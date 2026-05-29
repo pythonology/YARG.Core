@@ -13,7 +13,7 @@ namespace YARG.Core.Engine.Prediction
             SustainReleased = 3,
             StarPowerActivated = 4,
             // Whammy is tracked through rollback because the whammy timer affects SP
-            // accumulation on active sustains — dropping late samples produces wrong SP
+            // accumulation on active sustains -- dropping late samples produces wrong SP
             // scores on the receiver.
             Whammy = 5,
             Overstrum = 6,

@@ -12,7 +12,7 @@ namespace YARG.Core.Engine.Prediction
     // the slot a hit/miss event flips the pending decision with no rollback. Outside it the
     // decision is committed and any contradicting late event triggers rollback.
     //
-    // The scheduler doesn't talk to the engine — DrainDueDecisions surfaces committed decisions
+    // The scheduler doesn't talk to the engine -- DrainDueDecisions surfaces committed decisions
     // and the simulator translates them into ForceHit / ForceMiss calls.
     public sealed class NotePredictionScheduler<TNoteType>
         where TNoteType : Note<TNoteType>
@@ -22,7 +22,7 @@ namespace YARG.Core.Engine.Prediction
         // Extra commit-window slack on the FIRST note after the predicted kind changes
         // (hit↔miss). Transitions are the most likely moment for the prediction to be wrong, so
         // we hold the slot open longer for the next confirmation to land in-window. 0.025 s
-        // gives 0.075 s total commit slack on transitions — still inside typical guitar hit
+        // gives 0.075 s total commit slack on transitions -- still inside typical guitar hit
         // windows so the engine's own miss-detection doesn't pre-empt.
         public const double DefaultModeChangeExtensionSeconds = 0.025;
 
@@ -50,7 +50,7 @@ namespace YARG.Core.Engine.Prediction
 
         private readonly IReadOnlyList<TNoteType> _notes;
 
-        // Mutually exclusive — Register* enforces.
+        // Mutually exclusive -- Register* enforces.
         private readonly HashSet<int> _confirmedMisses = new();
         private readonly HashSet<int> _confirmedHits = new();
 
@@ -96,11 +96,6 @@ namespace YARG.Core.Engine.Prediction
         {
             if (_confirmedHits.Contains(noteIndex))  return true;
             if (_confirmedMisses.Contains(noteIndex)) return false;
-
-            if (noteIndex >= 0 && noteIndex < _notes.Count && _notes[noteIndex].IsChord)
-            {
-                return true;
-            }
 
             for (int i = noteIndex - 1; i >= 0; i--)
             {
@@ -191,7 +186,7 @@ namespace YARG.Core.Engine.Prediction
 
         /// <summary>Drain decisions for uncommitted notes with <c>note.Time &lt;= upToTime</c>,
         /// ignoring the commit-deadline check. Used when a non-note event arrives earlier than
-        /// the next note's commit deadline — its arrival proves the sender moved past those
+        /// the next note's commit deadline -- its arrival proves the sender moved past those
         /// notes, so the "wait for late confirmation" is already done. Required to keep the
         /// simulator's snapshot-monotonicity invariant.</summary>
         public void ForceDrainUpTo(double upToTime, List<Decision> output)
@@ -230,7 +225,7 @@ namespace YARG.Core.Engine.Prediction
         }
 
         /// <summary>Rewind the commit cursor. Confirmed-status sets and the emitted-decisions
-        /// log are preserved — replay uses them to re-evaluate predictions during rollback.</summary>
+        /// log are preserved -- replay uses them to re-evaluate predictions during rollback.</summary>
         public void Rewind(int toNoteIndex)
         {
             if (toNoteIndex < 0) toNoteIndex = 0;

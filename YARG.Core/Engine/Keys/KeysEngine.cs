@@ -231,12 +231,6 @@ namespace YARG.Core.Engine.Keys
             }
         }
 
-        // Keys have no input-gesture sustain release (the key bitmask just changes); next
-        // EngineStateSnapshot reconciles any drift.
-        public override void ForceReleaseSustain(int noteIndex)
-        {
-        }
-
         public override EngineSnapshot CreateSnapshot()
         {
             var snap = new KeysEngineSnapshot();
