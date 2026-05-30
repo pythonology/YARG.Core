@@ -28,6 +28,13 @@ namespace YARG.Core.Engine.Prediction
         private readonly HashSet<int>    _confirmedReleased = new();
         private readonly HashSet<double> _confirmedSpActivations = new();
 
+        // RLE receive cursor: the next note index we haven't been told the outcome of.
+        // The sender only emits a packet on a hit<->miss flip, so the gap
+        // [_nextExpectedNoteIndex, transitionIndex - 1] is the opposite kind of the
+        // transition note and is filled in implicitly. Reset to the engine's NoteIndex
+        // on each authoritative snapshot.
+        private int _nextExpectedNoteIndex;
+
         private double _authoritativeSnapshotSongTime = double.NegativeInfinity;
 
         public RemotePlayerSimulator(
@@ -174,34 +181,70 @@ namespace YARG.Core.Engine.Prediction
 
         public bool OnNoteHit(int noteIndex, double currentSongTime)
         {
+            // Hit(N): fill [cursor, N-1] as implicit misses, then commit N as hit.
             return OnNoteOutcome(noteIndex, currentSongTime, explicitWasHit: true);
         }
 
-        // Shared body for OnNoteHit / OnNoteMissed. Unreliable transport; snapshots
-        // reconcile any dropped events.
+        // Shared body for OnNoteHit / OnNoteMissed under the run-length-encoded wire
+        // protocol. The sender only emits a packet when the outcome flips, so the
+        // implicit range [_nextExpectedNoteIndex, noteIndex - 1] is the OPPOSITE kind
+        // of the explicit one. We register each implicit note + the explicit one and
+        // do at most one rollback to the earliest mis-decided note's time -- that
+        // single rollback's forward replay reconciles every later note via the
+        // scheduler's now-up-to-date confirmed sets.
         private bool OnNoteOutcome(int noteIndex, double currentSongTime, bool explicitWasHit)
         {
             double remoteEngineTime = currentSongTime;
             double explicitNoteTime = (noteIndex >= 0 && noteIndex < _notes.Count)
                 ? _notes[noteIndex].Time : double.NaN;
 
-            bool needsRollback = explicitWasHit
+            int earliestRollbackIndex = -1;
+
+            // Implicit fill -- opposite kind. Clamped to non-negative in case a snapshot
+            // bumped the cursor past noteIndex (duplicate / out-of-order; ReliableOrdered
+            // shouldn't drop or reorder, but defensive against snapshot rewinds).
+            int fillStart = Math.Max(_nextExpectedNoteIndex, 0);
+            for (int i = fillStart; i < noteIndex; i++)
+            {
+                bool fillNeedsRollback = explicitWasHit
+                    ? _scheduler.RegisterMiss(i, remoteEngineTime)
+                    : _scheduler.RegisterHit(i, remoteEngineTime);
+                if (fillNeedsRollback && earliestRollbackIndex < 0)
+                {
+                    earliestRollbackIndex = i;
+                }
+            }
+
+            // Explicit transition note.
+            bool explicitNeedsRollback = explicitWasHit
                 ? _scheduler.RegisterHit(noteIndex, remoteEngineTime)
                 : _scheduler.RegisterMiss(noteIndex, remoteEngineTime);
+            if (explicitNeedsRollback && earliestRollbackIndex < 0)
+            {
+                earliestRollbackIndex = noteIndex;
+            }
+
+            // Advance the cursor past this transition. Don't rewind on duplicates.
+            if (noteIndex + 1 > _nextExpectedNoteIndex)
+            {
+                _nextExpectedNoteIndex = noteIndex + 1;
+            }
 
             string kind = explicitWasHit ? "Hit" : "Miss";
-            if (!needsRollback)
+            if (earliestRollbackIndex < 0)
             {
                 YargLogger.LogFormatTrace(
-                    "Prediction[sim-recv] Note{0} (matches prediction): noteIndex={1} engineTime={2:0.000}",
-                    kind, noteIndex, remoteEngineTime);
+                    "Prediction[sim-recv] Note{0} (matches prediction): noteIndex={1} fillRange=[{2},{3}] engineTime={4:0.000}",
+                    kind, noteIndex, fillStart, noteIndex - 1, remoteEngineTime);
                 return true;
             }
 
-            double rollbackTime = !double.IsNaN(explicitNoteTime) ? explicitNoteTime : remoteEngineTime;
+            double rollbackTime = (earliestRollbackIndex >= 0 && earliestRollbackIndex < _notes.Count)
+                ? _notes[earliestRollbackIndex].Time
+                : (!double.IsNaN(explicitNoteTime) ? explicitNoteTime : remoteEngineTime);
             YargLogger.LogFormatInfo(
-                "Prediction[sim-recv] Note{0} (rollback at noteIndex={1}): rollbackTime={2:0.000} engineCurrent={3:0.000}",
-                kind, noteIndex, rollbackTime, _engine.CurrentTime);
+                "Prediction[sim-recv] Note{0} (rollback at noteIndex={1}, earliest mis-decided={2}): rollbackTime={3:0.000} engineCurrent={4:0.000}",
+                kind, noteIndex, earliestRollbackIndex, rollbackTime, _engine.CurrentTime);
 
             return RollbackAndReplay(rollbackTime, explicitWasHit ? "hit" : "miss", injectedEvent: null);
         }
@@ -447,6 +490,10 @@ namespace YARG.Core.Engine.Prediction
 
             _scheduler.Rewind(_engine.NoteIndex);
 
+            // Snapshot is authoritative: the next sender transition references notes at
+            // or beyond the engine's restored NoteIndex, so resync the RLE fill cursor.
+            _nextExpectedNoteIndex = _engine.NoteIndex;
+
             foreach (var ev in postEvents)
             {
                 ApplyReplayEvent(ev);
@@ -509,6 +556,7 @@ namespace YARG.Core.Engine.Prediction
             _pendingOverstrums.Clear();
             _confirmedReleased.Clear();
             _confirmedSpActivations.Clear();
+            _nextExpectedNoteIndex = 0;
             _authoritativeSnapshotSongTime = double.NegativeInfinity;
             _consecutiveSkippedUpdates = 0;
             _lastUpdateLogSongTime = double.NegativeInfinity;
